@@ -1,0 +1,8 @@
+linters:
+  shellcheck:
+    shell: bash
+  csslint: {  }
+files:
+  ignore:
+    - 'bower_components/*'
+    - 'node_modules/*'
