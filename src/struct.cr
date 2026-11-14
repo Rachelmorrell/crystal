@@ -69,9 +69,9 @@ struct Struct
       {% for ivar in @type.instance_vars %}
         return false unless @{{ivar.id}} == other.@{{ivar.id}}
       {% end %}
-      return true
+      true
     else
-      return false
+      false
     end
   end
 
@@ -118,13 +118,7 @@ struct Struct
           {% if i > 0 %}
             pp.comma
           {% end %}
-          pp.group do
-            pp.text "@{{ivar.id}}="
-            pp.nest do
-              pp.breakable ""
-              @{{ivar.id}}.pretty_print(pp)
-            end
-          end
+          pp.key_value "@{{ivar.id}}", "=", @{{ivar.id}}
         {% end %}
       end
     {% end %}

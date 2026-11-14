@@ -28,7 +28,6 @@ module Crystal
     end
 
     def define_method_from_method_missing(method_missing, signature, original_call)
-      name_node = StringLiteral.new(signature.name)
       args_nodes = [] of ASTNode
       named_args_nodes = nil
       args_nodes_names = [] of {String?, String} # external <-> internal name
@@ -47,7 +46,7 @@ module Crystal
         end
       end
       if block = signature.block
-        block_vars = block.args.map_with_index do |var, index|
+        block_vars = block.args.map_with_index do |_, index|
           Var.new("_block_arg#{index}")
         end
         yield_exps = block_vars.map { |var| var.clone.as(ASTNode) }
@@ -60,11 +59,12 @@ module Crystal
       a_def = Def.new(signature.name, args_nodes_names.map { |ext_name, name| Arg.new(name, external_name: ext_name) })
       a_def.splat_index = signature.arg_types.size if signature.named_args
 
-      call = Call.new(nil, signature.name,
+      call = Call.new(signature.name,
         args: args_nodes,
         named_args: named_args_nodes,
-        block: block_node.is_a?(Block) ? block_node : nil)
-      fake_call = Call.new(nil, "method_missing", [call] of ASTNode)
+        block: block_node.is_a?(Block) ? block_node : nil).at(original_call)
+      call.name_location = original_call.name_location
+      fake_call = Call.new("method_missing", call).at(original_call)
 
       expanded_macro, macro_expansion_pragmas = program.expand_macro method_missing, fake_call, self, self
 
@@ -94,7 +94,7 @@ module Crystal
         end
 
         a_def.body = generated_nodes
-        a_def.yields = block.try &.args.size
+        a_def.block_arity = block.try &.args.size
       end
 
       owner = self
@@ -181,7 +181,7 @@ private def starts_with_def?(source)
   while true
     token = lexer.next_token
     return true if token.keyword?(:def)
-    break if token.type == :EOF
+    break if token.type.eof?
   end
   false
 end

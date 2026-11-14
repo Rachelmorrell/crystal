@@ -5,7 +5,7 @@ require "./subtle"
 # Mazières, as [presented at USENIX in
 # 1999](https://www.usenix.org/legacy/events/usenix99/provos/provos_html/index.html).
 #
-# The algorithm has a maximum password length limit of 71 characters (see
+# The algorithm has a maximum password length limit of 72 bytes (see
 # [this comment](https://security.stackexchange.com/questions/39849/does-bcrypt-have-a-maximum-password-length#answer-39851)
 # on stackoverflow).
 #
@@ -21,14 +21,11 @@ require "./subtle"
 # application. Be sure to test and select this based on your server, not your
 # home computer.
 #
-# This implementation of Bcrypt is currently 50% slower than pure C solutions,
-# so keep this in mind when selecting your cost. It may be wise to test with
-# Ruby's [bcrypt gem](https://github.com/codahale/bcrypt-ruby)
-# which is a binding to OpenBSD's implementation.
-#
 # Last but not least: beware of denial of services! Always protect your
 # application using an external strategy (eg: rate limiting), otherwise
 # endpoints that verifies bcrypt hashes will be an easy target.
+#
+# NOTE: To use `Bcrypt`, you must explicitly import it with `require "crypto/bcrypt"`
 class Crypto::Bcrypt
   class Error < Exception
   end
@@ -42,29 +39,69 @@ class Crypto::Bcrypt
   private DIGEST_SIZE     = 31
 
   # bcrypt IV: "OrpheanBeholderScryDoubt"
-  private CIPHER_TEXT = UInt32.static_array(
-    0x4f727068, 0x65616e42, 0x65686f6c,
-    0x64657253, 0x63727944, 0x6f756274,
-  )
+  {% if compare_versions(Crystal::VERSION, "1.16.0") >= 0 %}
+    private CIPHER_TEXT = Slice(UInt32).literal(
+      0x4f727068, 0x65616e42, 0x65686f6c,
+      0x64657253, 0x63727944, 0x6f756274,
+    )
+  {% else %}
+    private CIPHER_TEXT = UInt32.static_array(
+      0x4f727068, 0x65616e42, 0x65686f6c,
+      0x64657253, 0x63727944, 0x6f756274,
+    )
+  {% end %}
 
-  def self.hash_secret(password, cost = DEFAULT_COST) : String
-    # We make a clone here to we don't keep a mutable reference to the original string
-    passwordb = password.to_unsafe.to_slice(password.bytesize + 1).clone # include leading 0
+  # Hashes the *password* using bcrypt algorithm using salt obtained via `Random::Secure.random_bytes(SALT_SIZE)`.
+  #
+  # ```
+  # require "crypto/bcrypt"
+  #
+  # Crypto::Bcrypt.hash_secret "secret"
+  # ```
+  def self.hash_secret(password : String, cost : Int32 = DEFAULT_COST) : String
+    passwordb = password_bytes(password)
     saltb = Random::Secure.random_bytes(SALT_SIZE)
     new(passwordb, saltb, cost).to_s
   end
 
-  def self.new(password : String, salt : String, cost = DEFAULT_COST)
-    # We make a clone here to we don't keep a mutable reference to the original string
-    passwordb = password.to_unsafe.to_slice(password.bytesize + 1).clone # include leading 0
+  # Creates a new `Crypto::Bcrypt` object from the given *password* with *salt* and *cost*.
+  #
+  # *salt* must be a base64 encoded string of 16 bytes (128 bits).
+  #
+  # ```
+  # require "crypto/bcrypt"
+  #
+  # password = Crypto::Bcrypt.new "secret", "CJjskaIgXR32DJYjVyNPdA=="
+  # password.to_s # => "$2a$11$CJjskaIgXR32DJYjVyNPd./ajV3Yj6GiP0IAI6rR.fMnjRgozqqqG"
+  # ```
+  def self.new(password : String, salt : String, cost : Int32 = DEFAULT_COST) : self
+    passwordb = password_bytes(password)
     saltb = Base64.decode(salt, SALT_SIZE)
     new(passwordb, saltb, cost)
+  end
+
+  # Returns the bytes bcrypt derives the hash from: the *password* followed by its NUL terminator.
+  # Only the first 72 bytes are used, so the terminator of a 72-byte password is left out.
+  private def self.password_bytes(password : String) : Bytes
+    bytesize = password.bytesize
+    bytesize += 1 if bytesize < PASSWORD_RANGE.end
+
+    # We make a clone here so we don't keep a mutable reference to the original string
+    password.to_unsafe.to_slice(bytesize).clone
   end
 
   getter password : Bytes
   getter salt : Bytes
   getter cost : Int32
 
+  # Creates a new `Crypto::Bcrypt` object from the given *password* with *salt* in bytes and *cost*.
+  #
+  # ```
+  # require "crypto/bcrypt"
+  #
+  # password = Crypto::Bcrypt.new "secret".to_slice, "salt_of_16_chars".to_slice
+  # password.digest
+  # ```
   def initialize(@password : Bytes, @salt : Bytes, @cost = DEFAULT_COST)
     raise Error.new("Invalid cost") unless COST_RANGE.includes?(cost)
     raise Error.new("Invalid salt size") unless salt.size == SALT_SIZE
@@ -73,13 +110,13 @@ class Crypto::Bcrypt
 
   @digest : Bytes?
 
-  def digest
+  def digest : Bytes
     @digest ||= hash_password
   end
 
   @hash : String?
 
-  def to_s
+  def to_s : String
     @hash ||= begin
       salt64 = Base64.encode(salt, salt.size)
       digest64 = Base64.encode(digest, digest.size - 1)
@@ -101,7 +138,8 @@ class Crypto::Bcrypt
     blowfish = Blowfish.new(BLOWFISH_ROUNDS)
     blowfish.enhance_key_schedule(salt, password, cost)
 
-    cipher = CIPHER_TEXT.dup
+    cipher = uninitialized UInt32[6]
+    cipher.to_slice.copy_from(CIPHER_TEXT.to_slice)
     cdata = cipher.to_unsafe
 
     0.step(to: 4, by: 2) do |i|

@@ -4,15 +4,20 @@ require "../types"
 
 module Crystal
   class Program
-    def cleanup(node)
-      transformer = CleanupTransformer.new(self)
+    getter(cleanup_transformer : CleanupTransformer) do
+      CleanupTransformer.new(self)
+    end
+
+    def cleanup(node, inside_def = false)
+      transformer = self.cleanup_transformer
+      transformer.inside_def! if inside_def
       node = node.transform(transformer)
       puts node if ENV["AFTER"]? == "1"
       node
     end
 
     def cleanup_types
-      transformer = CleanupTransformer.new(self)
+      transformer = self.cleanup_transformer
 
       after_inference_types.each do |type|
         cleanup_type type, transformer
@@ -46,7 +51,7 @@ module Crystal
 
     def cleanup_files
       tempfiles.each do |tempfile|
-        File.delete(tempfile) rescue nil
+        File.delete?(tempfile)
       end
     end
   end
@@ -61,12 +66,22 @@ module Crystal
   class CleanupTransformer < Transformer
     @transformed : Set(Def)
 
+    # The current method we are processing
+    @current_def : Def?
+    @visiting = [] of Def
+    @pending_callers = ({} of Def => Set(Def)).compare_by_identity
+    @pending_callees = ({} of Def => Def).compare_by_identity
+
     def initialize(@program : Program)
       @transformed = Set(Def).new.compare_by_identity
       @exhaustiveness_checker = ExhaustivenessChecker.new(@program)
       @def_nest_count = 0
       @last_is_truthy = false
       @last_is_falsey = false
+    end
+
+    def inside_def!
+      @def_nest_count += 1
     end
 
     def after_transform(node)
@@ -108,10 +123,16 @@ module Crystal
       @last_is_falsey = false
     end
 
-    def compute_last_truthiness
+    def compute_last_truthiness(&)
       reset_last_status
       yield
       {@last_is_truthy, @last_is_falsey}
+    end
+
+    def transform(node : AnnotationDef)
+      @program.check_call_to_deprecated_annotation node
+
+      node
     end
 
     def transform(node : Def)
@@ -121,6 +142,13 @@ module Crystal
 
     def transform(node : ClassDef)
       super
+
+      # check superclass for deprecation if the node isn't deprecated
+      if (type = node.type.lookup_type?(node.name)) && !type.annotation(@program.deprecated_annotation)
+        if ((superclass = node.superclass).is_a?(Path) && (stype = superclass.type? || node.type.lookup_type?(superclass)))
+          @program.check_deprecated_type(stype, superclass)
+        end
+      end
 
       node.hook_expansions.try &.map! &.transform self
       node
@@ -211,7 +239,7 @@ module Crystal
 
     def has_enum_type?(type)
       if type.is_a?(UnionType)
-        type.union_types.any? &.is_a?(EnumType)
+        type.union_types.any?(EnumType)
       else
         type.is_a?(EnumType)
       end
@@ -234,6 +262,54 @@ module Crystal
           end
         end
       end
+      nil
+    end
+
+    def transform(node : StringInterpolation)
+      # See if we can solve all the pieces to string literals.
+      # If that's the case, we can replace the entire interpolation
+      # with a single string literal.
+      pieces = node.expressions.dup
+      solve_string_interpolation_expressions(pieces)
+
+      if pieces.all?(StringLiteral)
+        string = pieces.join(&.as(StringLiteral).value)
+        string_literal = StringLiteral.new(string).at(node)
+        string_literal.type = @program.string
+        return string_literal
+      end
+
+      if expanded = node.expanded
+        return expanded.transform(self)
+      end
+      node
+    end
+
+    private def solve_string_interpolation_expressions(pieces : Array(ASTNode))
+      pieces.each_with_index do |piece, i|
+        replacement = solve_string_interpolation_expression(piece)
+        next unless replacement
+
+        pieces[i] = replacement
+      end
+    end
+
+    private def solve_string_interpolation_expression(piece : ASTNode) : StringLiteral?
+      if piece.is_a?(ExpandableNode)
+        if expanded = piece.expanded
+          return solve_string_interpolation_expression(expanded)
+        end
+      end
+
+      case piece
+      when Path
+        if target_const = piece.target_const
+          return solve_string_interpolation_expression(target_const.value)
+        end
+      when StringLiteral
+        return piece
+      end
+
       nil
     end
 
@@ -265,7 +341,7 @@ module Crystal
 
       if target.is_a?(Path)
         const = target.target_const.not_nil!
-        return node unless const.used?
+        return node if !const.used? || const.cleaned_up?
 
         unless const.value.type?
           node.raise "can't infer type of constant #{const} (maybe the constant refers to itself?)"
@@ -285,9 +361,13 @@ module Crystal
       if target.is_a?(Path)
         const = const.not_nil!
         const.value = const.value.transform self
+        const.cleaned_up = true
       end
 
-      if node.target == node.value
+      if target == node.value &&
+         # This condition is because the interpreter will generate expressions
+         # like `$~ = $~` in multidispatches, and that's fine.
+         !(target.is_a?(Var) && target.special_var?)
         node.raise "expression has no effect"
       end
 
@@ -301,16 +381,99 @@ module Crystal
       node
     end
 
+    def transform(node : MultiAssign)
+      expanded = node.expanded
+
+      if node.values.size == 1 && expanded
+        # the expanded node always starts with `temp = {{ node.values[0] }}`;
+        # `temp_assign` is this whole Assign node and its deduced type is same
+        # as the original RHS's type
+        temp_assign = expanded.as(Expressions).expressions.first
+        type = temp_assign.type?
+
+        # if the Assign node's RHS is untyped, this and all following
+        # assignments are unreachable
+        unless type
+          return untyped_expression node
+        end
+
+        target_count = node.targets.size
+        has_strict_multi_assign = @program.has_flag?("strict_multi_assign")
+
+        # disallows `a, *b, c = {0 => "x", 1 => "y", 2 => "z"}`, as `Hash` is
+        # not `Indexable`
+        # also disallows `a, b, c = ...` if the strict flag is set
+        if node.targets.any?(Splat) || has_strict_multi_assign
+          unless type.implements?(@program.indexable)
+            node.values.first.raise "right-hand side of one-to-many assignment must be an Indexable, not #{type}"
+          end
+        end
+
+        if has_strict_multi_assign
+          case type
+          when UnionType
+            sizes = type.union_types.map { |union_type| constant_size(union_type) }
+            if sizes.none? &.in?(target_count, nil)
+              node.values.first.raise "cannot assign #{type} to #{target_count} targets"
+            end
+          else
+            if size = constant_size(type)
+              unless size == target_count
+                node.values.first.raise "cannot assign #{type} to #{target_count} targets"
+              end
+            end
+          end
+        end
+      end
+
+      if expanded
+        return expanded.transform self
+      end
+
+      node
+    end
+
+    private def constant_size(type)
+      case type
+      when TupleInstanceType
+        type.size
+      end
+    end
+
+    def transform(node : Path)
+      if const = node.target_const
+        @program.check_deprecated_constant(const, node)
+
+        # Some constants might not have been cleaned up at this point because
+        # they don't have an explicit `Assign` node. One example is regex
+        # literals: a constant is created for them, but there's no `Assign` node.
+        if const.used? && !const.cleaned_up?
+          const.value = const.value.transform self
+          const.cleaned_up = true
+        end
+      elsif type = node.target_type
+        @program.check_deprecated_type(type, node)
+      end
+
+      node
+    end
+
+    def transform(node : Generic)
+      transform_many node.type_vars
+
+      node
+    end
+
     private def void_lib_call?(node)
-      return unless node.is_a?(Call)
+      return false unless node.is_a?(Call)
 
       obj = node.obj
-      return unless obj.is_a?(Path)
+      return false unless obj.is_a?(Path)
 
       type = obj.type?
-      return unless type.is_a?(LibType)
+      return false unless type.is_a?(LibType)
 
-      node.type?.try &.nil_type?
+      !!node.type?.try &.nil_type?
     end
 
     def transform(node : Global)
@@ -325,8 +488,6 @@ module Crystal
       if expanded = node.expanded
         return expanded.transform self
       end
-
-      @program.check_call_to_deprecated_method(node)
 
       # Need to transform these manually because node.block doesn't
       # need to be transformed if it has a fun_literal
@@ -425,8 +586,6 @@ module Crystal
       end
 
       if target_defs = node.target_defs
-        changed = false
-
         if target_defs.size == 1
           if target_defs[0].is_a?(External)
             check_args_are_not_closure node, "can't send closure to C function"
@@ -435,15 +594,50 @@ module Crystal
           end
         end
 
+        current_def = @current_def
+        @visiting << current_def if current_def
+
         target_defs.each do |target_def|
           if @transformed.add?(target_def)
             node.bubbling_exception do
+              @current_def = target_def
               @def_nest_count += 1
               target_def.body = target_def.body.transform(self)
               @def_nest_count -= 1
+              @current_def = current_def
+            end
+
+            # propagate raises state of unresolved cycle to dependents
+            callers = @pending_callers.delete(target_def)
+            if target_def.raises?
+              callers.try &.each do |caller_def|
+                caller_def.raises = true
+                @pending_callees.delete(caller_def)
+              end
+            end
+          elsif current_def && !current_def.raises? && !target_def.raises?
+            if @visiting.any?(&.same?(target_def))
+              # cycle detected: can't decide if target_def raises, yet
+              callers = @pending_callers.put_if_absent(target_def) { Set(Def).new.compare_by_identity }
+              @visiting.each do |caller_def|
+                callers << caller_def
+                @pending_callees[caller_def] = target_def
+              end
+            elsif existing_target_def = @pending_callees[target_def]?
+              # no cycles here, but target_def is already part of a pending
+              # cycle: append this def to that same cycle
+              callers = @pending_callers.put_if_absent(existing_target_def) { Set(Def).new.compare_by_identity }
+              callers << current_def
+              @pending_callees[current_def] = existing_target_def
             end
           end
+
+          # If the current call targets a method that raises, the method
+          # where the call happens also raises.
+          current_def.raises = true if current_def && target_def.raises?
         end
+
+        @visiting.pop if current_def
 
         if node.target_defs.not_nil!.empty?
           exps = [] of ASTNode
@@ -468,6 +662,11 @@ module Crystal
         node.named_args = nil
       end
 
+      # Check deprecations last, after the arguments have been flattened.
+      unless @current_def.try(&.annotation(@program.deprecated_annotation))
+        @program.check_call_to_deprecated_method(node)
+      end
+
       node
     end
 
@@ -489,10 +688,12 @@ module Crystal
         if @a_def.vars.try &.[node.name]?.try &.closured?
           @vars << node
         end
+        false
       end
 
       def visit(node : InstanceVar)
         @vars << node
+        false
       end
 
       def visit(node : ASTNode)
@@ -598,12 +799,17 @@ module Crystal
     end
 
     def transform(node : ProcLiteral)
+      current_def = @current_def
+      @current_def = node.def
+
       body = node.def.body
       if node.def.no_returns? && !body.type?
         node.def.body = untyped_expression(body)
       else
         node.def.body = node.def.body.transform(self)
       end
+
+      @current_def = current_def
       node
     end
 
@@ -634,7 +840,7 @@ module Crystal
 
       # If the yield has a no-return expression, the yield never happens:
       # replace it with a series of expressions up to the one that no-returns.
-      no_return_index = node.exps.index &.no_returns?
+      no_return_index = node.exps.index { |exp| !exp.type? || exp.no_returns? }
       if no_return_index
         exps = Expressions.new(node.exps[0, no_return_index + 1])
         exps.bind_to(exps.expressions.last)
@@ -733,7 +939,7 @@ module Crystal
       transform_is_a_or_responds_to node, &.filter_by_responds_to(node.name)
     end
 
-    def transform_is_a_or_responds_to(node)
+    def transform_is_a_or_responds_to(node, &)
       obj = node.obj
 
       if obj_type = obj.type?
@@ -844,9 +1050,26 @@ module Crystal
       exp_type = node.exp.type?
 
       if exp_type
-        instance_type = exp_type.instance_type.devirtualize
-        if instance_type.struct? || instance_type.module? || instance_type.is_a?(UnionType)
+        case instance_type = exp_type.devirtualize
+        when .struct?, .module?, .metaclass?, .void?, .no_return?, UnionType
           node.exp.raise "instance_sizeof can only be used with a class, but #{instance_type} is a #{instance_type.type_desc}"
+        end
+      end
+
+      if expanded = node.expanded
+        return expanded.transform self
+      end
+
+      node
+    end
+
+    def transform(node : InstanceAlignOf)
+      exp_type = node.exp.type?
+
+      if exp_type
+        case instance_type = exp_type.devirtualize
+        when .struct?, .module?, .metaclass?, .void?, .no_return?, UnionType
+          node.exp.raise "instance_alignof can only be used with a class, but #{instance_type} is a #{instance_type.type_desc}"
         end
       end
 
@@ -876,6 +1099,7 @@ module Crystal
       # at not invoked block.). This assignment is for it.
       node.program = @program
       node.update
+      node.validate_splats!
 
       node
     end
@@ -907,9 +1131,17 @@ module Crystal
     end
 
     def transform(node : Primitive)
-      if extra = node.extra
-        node.extra = extra.transform(self)
+      extra = node.extra
+      extra = extra.transform(self) if extra
+
+      # For `allocate` on a virtual abstract type we make `extra`
+      # be a call to `raise` at runtime. Here we just replace the
+      # "allocate" primitive with that raise call.
+      if node.name.in?("allocate", "pre_initialize") && extra
+        return extra
       end
+
+      node.extra = extra
       node
     end
 
@@ -917,10 +1149,7 @@ module Crystal
       node = super
 
       unless node.type?
-        if dependencies = node.dependencies?
-          node.unbind_from node.dependencies
-        end
-
+        node.unbind_from node.dependencies
         node.bind_to node.expressions
       end
 

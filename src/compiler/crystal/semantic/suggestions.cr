@@ -13,10 +13,10 @@ module Crystal
       type = self
       names.each_with_index do |name, idx|
         previous_type = type
-        type = previous_type.types?.try &.[name]?
+        type = previous_type.lookup_name(name)
         unless type
           best_match = Levenshtein.find(name.downcase) do |finder|
-            previous_type.types?.try &.each_key do |type_name|
+            previous_type.remove_alias.types?.try &.each_key do |type_name|
               finder.test(type_name.downcase, type_name)
             end
           end
@@ -38,14 +38,14 @@ module Crystal
     end
 
     def lookup_similar_def(name, args_size, block)
-      return nil unless name =~ SuggestableDefName
+      return nil unless name.matches?(SuggestableDefName)
 
       if (defs = self.defs)
         best_def = nil
         best_match = nil
         Levenshtein.find(name) do |finder|
           defs.each do |def_name, hash|
-            if def_name =~ SuggestableDefName
+            if def_name.matches?(SuggestableDefName)
               hash.each do |def_with_metadata|
                 if def_with_metadata.max_size == args_size && def_with_metadata.yields == !!block && def_with_metadata.def.name != name
                   finder.test(def_name)

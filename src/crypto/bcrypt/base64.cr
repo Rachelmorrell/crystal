@@ -20,7 +20,7 @@ module Crypto::Bcrypt::Base64
     51, 52, 53, -1, -1, -1, -1, -1,
   ]
 
-  def self.encode(d, len) : String
+  def self.encode(d, len : Int32) : String
     off = 0
 
     String.build do |str|
@@ -57,7 +57,7 @@ module Crypto::Bcrypt::Base64
     end
   end
 
-  def self.decode(string, maxolen) : Bytes
+  def self.decode(string : String, maxolen : Int32) : Bytes
     off, slen, olen = 0, string.size, 0
 
     i = -1
@@ -79,6 +79,7 @@ module Crypto::Bcrypt::Base64
       break if (olen += 1) >= maxolen || off >= slen
 
       c4 = char64(string[off])
+      break if c4 == -1
       str[i += 1] = (((c3 & 0x03) << 6) | c4).to_u8!
       off += 1
       olen += 1

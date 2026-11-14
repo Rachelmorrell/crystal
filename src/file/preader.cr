@@ -6,6 +6,7 @@ class File::PReader < IO
 
   @offset : Int64
   @bytesize : Int64
+  @pos : Int64
 
   def initialize(@file : File, offset : Int, bytesize : Int)
     @offset = offset.to_i64
@@ -13,32 +14,34 @@ class File::PReader < IO
     @pos = 0
   end
 
-  def unbuffered_read(slice : Bytes)
+  def unbuffered_read(slice : Bytes) : Int32
     check_open
 
     count = slice.size
     count = Math.min(count, @bytesize - @pos)
 
-    bytes_read = Crystal::System::FileDescriptor.pread(@file.fd, slice[0, count], @offset + @pos)
+    bytes_read = @file.@fd_lock.reference do
+      @file.system_pread(slice[0, count], @offset + @pos)
+    end
 
     @pos += bytes_read
 
-    bytes_read
+    bytes_read.to_i32
   end
 
-  def unbuffered_write(slice : Bytes)
+  def unbuffered_write(slice : Bytes) : NoReturn
     raise IO::Error.new("Can't write to read-only IO")
   end
 
-  def unbuffered_flush
+  def unbuffered_flush : NoReturn
     raise IO::Error.new("Can't flush read-only IO")
   end
 
-  def unbuffered_rewind
+  def unbuffered_rewind : Nil
     @pos = 0
   end
 
-  def unbuffered_close
+  def unbuffered_close : Nil
     @closed = true
   end
 end

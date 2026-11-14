@@ -39,7 +39,12 @@ struct Number
     new(1)
   end
 
-  # Returns self.
+  # See `Object#hash(hasher)`
+  def hash(hasher)
+    hasher.number(self)
+  end
+
+  # Returns `self`.
   def +
     self
   end
@@ -54,7 +59,7 @@ struct Number
   # :nodoc:
   macro expand_div(rhs_types, result_type)
     {% for rhs in rhs_types %}
-      @[AlwaysInline]
+      @[::AlwaysInline]
       def /(other : {{rhs}}) : {{result_type}}
         {{result_type}}.new(self) / {{result_type}}.new(other)
       end
@@ -71,8 +76,15 @@ struct Number
   # ints = Int64[1, 2, 3]
   # ints.class # => Array(Int64)
   # ```
+  #
+  # This is similar to an array literal of the same item type:
+  #
+  # ```
+  # Int64[1, 2, 3, 4]     # : Array(Int64)
+  # [1, 2, 3, 4] of Int64 # : Array(Int64)
+  # ```
   macro [](*nums)
-    Array({{@type}}).build({{nums.size}}) do |%buffer|
+    ::Array({{@type}}).build({{nums.size}}) do |%buffer|
       {% for num, i in nums %}
         %buffer[{{i}}] = {{@type}}.new({{num}})
       {% end %}
@@ -92,8 +104,16 @@ struct Number
   # ints = Int64.slice(1, 2, 3)
   # ints.class # => Slice(Int64)
   # ```
+  #
+  # This is a convenient alternative to `Slice.[]` for designating a
+  # specific item type which also considers autocasting.
+  #
+  # ```
+  # Int64.slice(1, 2, 3, 4)           # : Slice(Int64)
+  # Slice[1_i64, 2_i64, 3_i64, 4_i64] # : Slice(Int64)
+  # ```
   macro slice(*nums, read_only = false)
-    %slice = Slice({{@type}}).new({{nums.size}}, read_only: {{read_only}})
+    %slice = ::Slice({{@type}}).new({{nums.size}}, read_only: {{read_only}})
     {% for num, i in nums %}
       %slice.to_unsafe[{{i}}] = {{@type}}.new!({{num}})
     {% end %}
@@ -110,15 +130,28 @@ struct Number
   # ints = Int64.static_array(1, 2, 3)
   # ints.class # => StaticArray(Int64, 3)
   # ```
+  #
+  # This is a convenvenient alternative to `StaticArray.[]` for designating a
+  # specific item type which also considers autocasting.
+  #
+  # ```
+  # Int64.static_array(1, 2, 3, 4)          # : StaticArray(Int64)
+  # StaticArray[1_i64, 2_i64, 3_i64, 4_i64] # : StaticArray(Int64)
+  # ```
   macro static_array(*nums)
-    %array = uninitialized StaticArray({{@type}}, {{nums.size}})
+    %array = uninitialized ::StaticArray({{@type}}, {{nums.size}})
     {% for num, i in nums %}
       %array.to_unsafe[{{i}}] = {{@type}}.new!({{num}})
     {% end %}
     %array
   end
 
-  # :ditto:
+  # Performs a `#step` in the direction of the _limit_. For instance:
+  #
+  # ```
+  # 10.step(to: 5).to_a # => [10, 9, 8, 7, 6, 5]
+  # 5.step(to: 10).to_a # => [5, 6, 7, 8, 9, 10]
+  # ```
   def step(*, to limit = nil, exclusive : Bool = false, &) : Nil
     if limit
       direction = limit <=> self
@@ -146,7 +179,7 @@ struct Number
   # 123.abs  # => 123
   # -123.abs # => 123
   # ```
-  def abs
+  def abs : self
     self < 0 ? -self : self
   end
 
@@ -170,7 +203,7 @@ struct Number
   # 0.sign   # => 0
   # -42.sign # => -1
   # ```
-  def sign
+  def sign : Int32
     self < 0 ? -1 : (self == 0 ? 0 : 1)
   end
 
@@ -190,8 +223,8 @@ struct Number
   # Returns:
   # - `-1` if `self` is less than *other*
   # - `0` if `self` is equal to *other*
-  # - `-1` if `self` is greater than *other*
-  # - `nil` if self is `NaN` or *other* is `NaN`, because `NaN` values are not comparable
+  # - `1` if `self` is greater than *other*
+  # - `nil` if `self` is `NaN` or *other* is `NaN`, because `NaN` values are not comparable
   def <=>(other) : Int32?
     # NaN can't be compared to other numbers
     return nil if self.is_a?(Float) && self.nan?
@@ -218,12 +251,9 @@ struct Number
     if digits < 0
       raise ArgumentError.new "digits should be non-negative"
     end
+    return self if zero?
 
     x = self.to_f
-
-    if x == 0
-      return x
-    end
 
     if base == 10
       log = Math.log10(self.abs)
@@ -316,6 +346,22 @@ struct Number
     in .ties_even?
       round_even
     end
+  end
+
+  # Returns `true` if `self` is an integer.
+  #
+  # Non-integer types may return `true` as long as `self` denotes a finite value
+  # without any fractional parts.
+  #
+  # ```
+  # 1.integer?       # => true
+  # 1.0.integer?     # => true
+  # 1.2.integer?     # => false
+  # (1 / 0).integer? # => false
+  # (0 / 0).integer? # => false
+  # ```
+  def integer? : Bool
+    self % 1 == 0
   end
 
   # Returns `true` if `self` is equal to zero.

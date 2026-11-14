@@ -1,40 +1,81 @@
 require "spec"
 require "http"
+require "spec/helpers/string"
+
+private def http_quote_string(io : IO, string)
+  HTTP.quote_string(string, io)
+end
+
+private def http_quote_string(string)
+  HTTP.quote_string(string)
+end
 
 describe HTTP do
-  it "parses RFC 1123" do
-    time = Time.utc(1994, 11, 6, 8, 49, 37)
-    HTTP.parse_time("Sun, 06 Nov 1994 08:49:37 GMT").should eq(time)
+  describe ".content_length" do
+    it "returns nil without a Content-Length header" do
+      HTTP.content_length(HTTP::Headers.new).should be_nil
+    end
+
+    it "accepts decimal digits" do
+      {"0" => 0_u64, "1" => 1_u64, "001" => 1_u64, UInt64::MAX.to_s => UInt64::MAX}.each do |value, expected|
+        HTTP.content_length(HTTP::Headers{"Content-Length" => value}).should eq expected
+      end
+    end
+
+    it "rejects empty values and non-decimal characters" do
+      ["", "+1", "-1", "+0", "-0", " 1", "1 ", "1\t", "1_0", "0x1", "d", "D", "1d", "1D", "1.0", "1,1", "١"].each do |value|
+        expect_raises(ArgumentError, "Invalid Content-Length: #{value}") do
+          HTTP.content_length(HTTP::Headers{"Content-Length" => value})
+        end
+      end
+    end
+
+    it "rejects overflow" do
+      expect_raises(ArgumentError) do
+        HTTP.content_length(HTTP::Headers{"Content-Length" => "18446744073709551616"})
+      end
+    end
   end
 
-  it "parses RFC 1123 without day name" do
-    time = Time.utc(1994, 11, 6, 8, 49, 37)
-    HTTP.parse_time("06 Nov 1994 08:49:37 GMT").should eq(time)
-  end
+  describe ".parse_time" do
+    it "parses RFC 1123" do
+      time = Time.utc(1994, 11, 6, 8, 49, 37)
+      HTTP.parse_time("Sun, 06 Nov 1994 08:49:37 GMT").should eq(time)
+    end
 
-  it "parses RFC 1036" do
-    time = Time.utc(1994, 11, 6, 8, 49, 37)
-    HTTP.parse_time("Sunday, 06-Nov-94 08:49:37 GMT").should eq(time)
-  end
+    it "parses RFC 1123 without day name" do
+      time = Time.utc(1994, 11, 6, 8, 49, 37)
+      HTTP.parse_time("06 Nov 1994 08:49:37 GMT").should eq(time)
+    end
 
-  it "parses ANSI C" do
-    time = Time.utc(1994, 11, 6, 8, 49, 37)
-    HTTP.parse_time("Sun Nov  6 08:49:37 1994").should eq(time)
-    time2 = Time.utc(1994, 11, 16, 8, 49, 37)
-    HTTP.parse_time("Sun Nov 16 08:49:37 1994").should eq(time2)
-  end
+    it "parses RFC 1036" do
+      time = Time.utc(1994, 11, 6, 8, 49, 37)
+      HTTP.parse_time("Sunday, 06-Nov-94 08:49:37 GMT").should eq(time)
+    end
 
-  it "parses and is UTC (#2744)" do
-    date = "Mon, 09 Sep 2011 23:36:00 GMT"
-    parsed_time = HTTP.parse_time(date).not_nil!
-    parsed_time.utc?.should be_true
-  end
+    it "parses ANSI C" do
+      time = Time.utc(1994, 11, 6, 8, 49, 37)
+      HTTP.parse_time("Sun Nov  6 08:49:37 1994").should eq(time)
+      time2 = Time.utc(1994, 11, 16, 8, 49, 37)
+      HTTP.parse_time("Sun Nov 16 08:49:37 1994").should eq(time2)
+    end
 
-  it "parses and is local (#2744)" do
-    date = "Mon, 09 Sep 2011 23:36:00 -0300"
-    parsed_time = HTTP.parse_time(date).not_nil!
-    parsed_time.offset.should eq -3 * 3600
-    parsed_time.to_utc.to_s.should eq("2011-09-10 02:36:00 UTC")
+    it "parses and is UTC (#2744)" do
+      date = "Mon, 09 Sep 2011 23:36:00 GMT"
+      parsed_time = HTTP.parse_time(date).should_not(be_nil)
+      parsed_time.utc?.should be_true
+    end
+
+    it "parses and is local (#2744)" do
+      date = "Mon, 09 Sep 2011 23:36:00 -0300"
+      parsed_time = HTTP.parse_time(date).should_not(be_nil)
+      parsed_time.offset.should eq -3 * 3600
+      parsed_time.to_utc.to_s.should eq("2011-09-10 02:36:00 UTC")
+    end
+
+    it "handles errors" do
+      HTTP.parse_time("Thu").should be_nil
+    end
   end
 
   describe "generates HTTP date" do
@@ -57,10 +98,10 @@ describe HTTP do
 
   describe ".quote_string" do
     it "quotes a string" do
-      HTTP.quote_string("foo!#():;?~").should eq("foo!#():;?~")
-      HTTP.quote_string(%q(foo"bar\baz)).should eq(%q(foo\"bar\\baz))
-      HTTP.quote_string("\t ").should eq("\\\t\\ ")
-      HTTP.quote_string("it works 😂😂😂👌👌👌😂😂😂").should eq("it\\ works\\ 😂😂😂👌👌👌😂😂😂")
+      assert_prints http_quote_string("foo!#():;?~"), "foo!#():;?~"
+      assert_prints http_quote_string(%q(foo"bar\baz)), %q(foo\"bar\\baz)
+      assert_prints http_quote_string("\t "), "\\\t\\ "
+      assert_prints http_quote_string("it works 😂😂😂👌👌👌😂😂😂"), "it\\ works\\ 😂😂😂👌👌👌😂😂😂"
     end
 
     it "raises on invalid characters" do
@@ -74,6 +115,33 @@ describe HTTP do
 
       expect_raises(ArgumentError, "String contained invalid character") do
         HTTP.quote_string("foo\u{7F}bar")
+      end
+    end
+  end
+
+  describe ".validate_token" do
+    it "accepts valid token" do
+      HTTP.validate_token("foo").should eq "foo"
+      HTTP.validate_token("foo-bar+baz").should eq "foo-bar+baz"
+    end
+
+    it "rejects empty token" do
+      expect_raises(ArgumentError, "Invalid HTTP token") do
+        HTTP.validate_token("")
+      end
+    end
+
+    it "rejects invalid tokens" do
+      expect_raises(ArgumentError, "Invalid HTTP token") do
+        HTTP.validate_token("foo bar")
+      end
+
+      expect_raises(ArgumentError, "Invalid HTTP token") do
+        HTTP.validate_token("foo(bar)")
+      end
+
+      expect_raises(ArgumentError, "Invalid HTTP token") do
+        HTTP.validate_token("foo@bar")
       end
     end
   end

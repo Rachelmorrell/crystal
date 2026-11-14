@@ -1,6 +1,6 @@
 class LLVM::Context
-  def self.new
-    new(LibLLVM.create_context)
+  def self.new(*, dispose_on_finalize : Bool = true)
+    new(LibLLVM.create_context, dispose_on_finalize)
   end
 
   def initialize(@unwrap : LibLLVM::ContextRef, @dispose_on_finalize = true)
@@ -9,14 +9,10 @@ class LLVM::Context
   end
 
   def new_module(name : String) : Module
-    {% if LibLLVM::IS_38 %}
-      Module.new(LibLLVM.module_create_with_name_in_context(name, self), name, self)
-    {% else %}
-      # LLVM >= 3.9
-      Module.new(LibLLVM.module_create_with_name_in_context(name, self), self)
-    {% end %}
+    Module.new(LibLLVM.module_create_with_name_in_context(name, self), self)
   end
 
+  @[Deprecated("Use `LLVM::Module#new_builder` instead")]
   def new_builder : Builder
     # builder = Builder.new(LibLLVM.create_builder_in_context(self), self)
     builder = Builder.new(LibLLVM.create_builder_in_context(self))
@@ -56,6 +52,10 @@ class LLVM::Context
     Type.new LibLLVM.int_type_in_context(self, bits)
   end
 
+  def half : Type
+    Type.new LibLLVM.half_type_in_context(self)
+  end
+
   def float : Type
     Type.new LibLLVM.float_type_in_context(self)
   end
@@ -64,11 +64,39 @@ class LLVM::Context
     Type.new LibLLVM.double_type_in_context(self)
   end
 
-  def void_pointer : Type
-    int8.pointer
+  def x86_fp80 : Type
+    Type.new LibLLVM.x86_fp80_type_in_context(self)
   end
 
-  def struct(name : String, packed = false) : Type
+  def fp128 : Type
+    Type.new LibLLVM.fp128_type_in_context(self)
+  end
+
+  def ppc_fp128 : Type
+    Type.new LibLLVM.ppc_fp128_type_in_context(self)
+  end
+
+  def token : Type
+    Type.new LibLLVM.token_type_in_context(self)
+  end
+
+  def pointer(address_space = 0) : Type
+    {% if LibLLVM::IS_LT_150 %}
+      {% raise "Opaque pointers are only supported on LLVM 15.0 or above" %}
+    {% else %}
+      Type.new LibLLVM.pointer_type_in_context(self, address_space)
+    {% end %}
+  end
+
+  def void_pointer(address_space = 0) : Type
+    {% if LibLLVM::IS_LT_150 %}
+      int8.pointer(address_space)
+    {% else %}
+      pointer(address_space)
+    {% end %}
+  end
+
+  def struct(name : String, packed = false, &) : Type
     llvm_struct = LibLLVM.struct_create_named(self, name)
     the_struct = Type.new llvm_struct
     element_types = (yield the_struct).as(Array(LLVM::Type))
@@ -85,19 +113,60 @@ class LLVM::Context
   end
 
   def const_string(string : String) : Value
-    Value.new LibLLVM.const_string_in_context(self, string, string.bytesize, 0)
+    const_bytes(string.unsafe_byte_slice(0, string.bytesize + 1))
+  end
+
+  def const_bytes(bytes : Bytes) : Value
+    {% if LibLLVM::IS_LT_190 %}
+      Value.new LibLLVM.const_string_in_context(self, bytes, bytes.size, 1)
+    {% else %}
+      Value.new LibLLVM.const_string_in_context2(self, bytes, bytes.size, 1)
+    {% end %}
   end
 
   def const_struct(values : Array(LLVM::Value), packed = false) : Value
     Value.new LibLLVM.const_struct_in_context(self, (values.to_unsafe.as(LibLLVM::ValueRef*)), values.size, packed ? 1 : 0)
   end
 
-  def md_string(value : String) : Value
-    LLVM::Value.new LibLLVM.md_string_in_context(self, value, value.bytesize)
+  def metadata_string(value : String) : Metadata
+    {% if LibLLVM::IS_LT_90 %}
+      Metadata.new LibLLVM.value_as_metadata(LibLLVM.md_string_in_context(self, value, value.bytesize))
+    {% else %}
+      Metadata.new LibLLVM.md_string_in_context2(self, value, value.bytesize)
+    {% end %}
   end
 
+  @[Deprecated("Use `#metadata_string` instead")]
+  def md_string(value : String) : Value
+    {% if LibLLVM::IS_LT_90 %}
+      LLVM::Value.new LibLLVM.md_string_in_context(self, value, value.bytesize)
+    {% else %}
+      metadata = LibLLVM.md_string_in_context2(self, value, value.bytesize)
+      LLVM::Value.new LibLLVM.metadata_as_value(self, metadata)
+    {% end %}
+  end
+
+  def metadata_node(values : Array(Metadata)) : Metadata
+    {% if LibLLVM::IS_LT_90 %}
+      value = LibLLVM.md_node_in_context(self, values.map { |v| LibLLVM.metadata_as_value(self, v) }, values.size)
+      Metadata.new LibLLVM.value_as_metadata(value)
+    {% else %}
+      Metadata.new LibLLVM.md_node_in_context2(self, values.to_unsafe.as(LibLLVM::MetadataRef*), values.size)
+    {% end %}
+  end
+
+  @[Deprecated("Use `#metadata_node` instead")]
   def md_node(values : Array(Value)) : Value
-    Value.new LibLLVM.md_node_in_context(self, (values.to_unsafe.as(LibLLVM::ValueRef*)), values.size)
+    {% if LibLLVM::IS_LT_90 %}
+      Value.new LibLLVM.md_node_in_context(self, values.to_unsafe.as(LibLLVM::ValueRef*), values.size)
+    {% else %}
+      metadata = LibLLVM.md_node_in_context2(self, values.map { |value| LibLLVM.value_as_metadata(value) }, values.size)
+      Value.new LibLLVM.metadata_as_value(self, metadata)
+    {% end %}
+  end
+
+  def metadata_to_value(metadata : Metadata) : Value
+    Value.new(LibLLVM.metadata_as_value(self, metadata))
   end
 
   def parse_ir(buf : MemoryBuffer)
@@ -105,12 +174,7 @@ class LLVM::Context
     if ret != 0 && msg
       raise LLVM.string_and_dispose(msg)
     end
-    {% if LibLLVM::IS_38 %}
-      Module.new(mod, "unknown", self)
-    {% else %}
-      # LLVM >= 3.9
-      Module.new(mod, self)
-    {% end %}
+    Module.new(mod, self)
   end
 
   def ==(other : self)

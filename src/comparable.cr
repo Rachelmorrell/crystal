@@ -21,7 +21,7 @@
 module Comparable(T)
   # Compares this object to *other* based on the receiver’s `<=>` method,
   # returning `true` if it returns a negative number.
-  def <(other : T)
+  def <(other : T) : Bool
     cmp = self <=> other
     cmp ? cmp < 0 : false
   end
@@ -40,10 +40,10 @@ module Comparable(T)
   def ==(other : T)
     if self.is_a?(Reference)
       # Need to do two different comparisons because the compiler doesn't yet
-      # restrict something like `other.is_a?(Reference) || other.is_a?(Nil)`.
+      # restrict something like `other.is_a?(Reference) || other.nil?`.
       # See #2461
       return true if other.is_a?(Reference) && self.same?(other)
-      return true if other.is_a?(Nil) && self.same?(other)
+      return true if other.nil? && self.same?(other)
     end
 
     cmp = self <=> other
@@ -52,7 +52,7 @@ module Comparable(T)
 
   # Compares this object to *other* based on the receiver’s `<=>` method,
   # returning `true` if it returns a value greater then `0`.
-  def >(other : T)
+  def >(other : T) : Bool
     cmp = self <=> other
     cmp ? cmp > 0 : false
   end

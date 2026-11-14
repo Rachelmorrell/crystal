@@ -1,6 +1,6 @@
 require "socket"
-require "http/client"
-require "http/headers"
+require "../client"
+require "../headers"
 require "base64"
 {% if flag?(:without_openssl) %}
   require "crystal/digest/sha1"
@@ -13,7 +13,7 @@ require "uri"
 class HTTP::WebSocket::Protocol
   GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-  @[Flags]
+  @[::Flags]
   enum Flags : UInt8
     FINAL = 0x80
     RSV1  = 0x40
@@ -38,16 +38,22 @@ class HTTP::WebSocket::Protocol
     size : Int32,
     final : Bool
 
-  def initialize(@io : IO, masked = false, @sync_close = true)
+  getter protocol : String?
+
+  def initialize(@io : IO, masked = false, @sync_close = true, @protocol : String? = nil)
     @header = uninitialized UInt8[2]
     @mask = uninitialized UInt8[4]
     @mask_offset = 0
     @opcode = Opcode::CONTINUATION
     @remaining = 0_u64
+
+    # If true, outgoing data is masked and incoming data is unmasked.
     @masked = !!masked
   end
 
   class StreamIO < IO
+    getter? closed = false
+
     def initialize(@websocket : Protocol, binary, frame_size)
       @opcode = binary ? Opcode::BINARY : Opcode::TEXT
       @buffer = Bytes.new(frame_size)
@@ -55,6 +61,7 @@ class HTTP::WebSocket::Protocol
     end
 
     def write(slice : Bytes) : Nil
+      check_open
       return if slice.empty?
 
       count = Math.min(@buffer.size - @pos, slice.size)
@@ -62,7 +69,7 @@ class HTTP::WebSocket::Protocol
       @pos += count
 
       if @pos == @buffer.size
-        flush(final: false)
+        send_frame(final: false)
       end
 
       if count < slice.size
@@ -70,13 +77,13 @@ class HTTP::WebSocket::Protocol
       end
     end
 
-    def read(slice : Bytes)
+    def read(slice : Bytes) : NoReturn
       raise "This IO is write-only"
     end
 
-    def flush(final = true)
+    private def send_frame(final = false) : Nil
       @websocket.send(
-        @buffer + (@pos % @buffer.size),
+        @buffer[0...@pos],
         @opcode,
         flags: final ? Flags::FINAL : Flags::None,
         flush: final
@@ -84,29 +91,35 @@ class HTTP::WebSocket::Protocol
       @opcode = Opcode::CONTINUATION
       @pos = 0
     end
+
+    def close
+      return if closed?
+      @closed = true
+      send_frame(final: true)
+    end
   end
 
-  def send(data : String)
+  def send(data : String) : Nil
     send(data.to_slice, Opcode::TEXT)
   end
 
-  def send(data : Bytes)
+  def send(data : Bytes) : Nil
     send(data, Opcode::BINARY)
   end
 
-  def stream(binary = true, frame_size = 1024)
+  def stream(binary = true, frame_size = 1024, &)
     stream_io = StreamIO.new(self, binary, frame_size)
     yield(stream_io)
-    stream_io.flush
+    stream_io.close
   end
 
-  def send(data : Bytes, opcode : Opcode, flags = Flags::FINAL, flush = true)
+  def send(data : Bytes, opcode : Opcode, flags : Flags = Flags::FINAL, flush : Bool = true) : Nil
     write_header(data.size, opcode, flags)
     write_payload(data)
     @io.flush if flush
   end
 
-  def receive(buffer : Bytes)
+  def receive(buffer : Bytes) : PacketInfo
     if @remaining == 0
       opcode = read_header
     else
@@ -136,13 +149,36 @@ class HTTP::WebSocket::Protocol
   private def write_payload(data)
     return @io.write(data) unless @masked
 
-    key = Random::DEFAULT.next_int
+    key = Random.next_int
     mask_array = key.unsafe_as(StaticArray(UInt8, 4))
     @io.write mask_array.to_slice
 
-    data.each_with_index do |byte, index|
-      mask = mask_array[index & 0b11] # x & 0b11 == x % 4
-      @io.write_byte(byte ^ mask)
+    write_masked_data(data, mask_array)
+  end
+
+  private def write_masked_data(data, mask_array)
+    # We are going to write the data, masked, into a temporary buffer.
+    masked_data = uninitialized UInt8[IO::DEFAULT_BUFFER_SIZE]
+
+    # We'll do it by chunks of at most IO::DEFAULT_BUFFER_SIZE
+    remaining_data = data
+    until remaining_data.empty?
+      # How much data can we write?
+      # Either IO::DEFAULT_BUFFER_SIZE or whatever remains.
+      chunk_size = Math.min(remaining_data.size, IO::DEFAULT_BUFFER_SIZE)
+
+      # Mask the data
+      chunk = remaining_data[0, chunk_size]
+      chunk.each_with_index do |byte, index|
+        mask = mask_array[index & 0b11] # x & 0b11 == x % 4
+        masked_data[index] = byte ^ mask
+      end
+
+      # Write the masked data
+      @io.write(masked_data.to_slice[0, chunk_size])
+
+      # Discard the written data
+      remaining_data = remaining_data[chunk_size..]
     end
   end
 
@@ -154,8 +190,19 @@ class HTTP::WebSocket::Protocol
     opcode = read_opcode
     @remaining = read_size
 
-    # Read mask, if needed
-    if masked?
+    header_masked = (@header[1] & 0x80_u8) != 0_u8
+
+    if @masked
+      if header_masked
+        close :ProtocolError
+        raise "Protocol error: expected unmasked frame"
+      end
+    else
+      if !header_masked
+        close :ProtocolError
+        raise "Protocol error: expected masked frame"
+      end
+
       @io.read_fully(@mask.to_slice)
       @mask_offset = 0
     end
@@ -198,7 +245,7 @@ class HTTP::WebSocket::Protocol
   private def read_payload(buffer)
     count = Math.min(@remaining, buffer.size)
     @io.read_fully(buffer[0, count])
-    if masked?
+    unless @masked
       count.times do |i|
         buffer[i] ^= @mask[@mask_offset & 0b11] # x & 0b11 == x % 4
         @mask_offset += 1
@@ -215,10 +262,6 @@ class HTTP::WebSocket::Protocol
     (@header[0] & 0x80_u8) != 0_u8
   end
 
-  private def masked?
-    (@header[1] & 0x80_u8) != 0_u8
-  end
-
   def ping(message = nil)
     if message
       send(message.to_slice, Opcode::PING)
@@ -227,7 +270,7 @@ class HTTP::WebSocket::Protocol
     end
   end
 
-  def pong(message = nil)
+  def pong(message = nil) : Nil
     if message
       send(message.to_slice, Opcode::PONG)
     else
@@ -235,7 +278,7 @@ class HTTP::WebSocket::Protocol
     end
   end
 
-  def close(code : CloseCode? = nil, message = nil)
+  def close(code : CloseCode? = nil, message = nil) : Nil
     return if @io.closed?
 
     if message
@@ -259,11 +302,11 @@ class HTTP::WebSocket::Protocol
     @io.close if @sync_close
   end
 
-  def close(code : Int, message = nil)
+  def close(code : Int, message : String? = nil) : Nil
     close(CloseCode.new(code), message)
   end
 
-  def self.new(host : String, path : String, port = nil, tls : HTTP::Client::TLSContext = nil, headers = HTTP::Headers.new)
+  def self.new(host : String, path : String, port : Int32? = nil, tls : HTTP::Client::TLSContext = nil, headers : HTTP::Headers = HTTP::Headers.new, protocols : Enumerable(String)? = nil) : self
     {% if flag?(:without_openssl) %}
       if tls
         raise "WebSocket TLS is disabled because `-D without_openssl` was passed at compile time"
@@ -273,6 +316,7 @@ class HTTP::WebSocket::Protocol
     port ||= tls ? 443 : 80
 
     socket = TCPSocket.new(host, port)
+    accepted_protocol = nil
     begin
       {% if !flag?(:without_openssl) %}
         if tls
@@ -292,6 +336,7 @@ class HTTP::WebSocket::Protocol
       headers["Upgrade"] = "websocket"
       headers["Sec-WebSocket-Version"] = VERSION
       headers["Sec-WebSocket-Key"] = random_key
+      headers["Sec-WebSocket-Protocol"] = protocols.join(",") if protocols && !protocols.empty?
 
       path = "/" if path.empty?
       handshake = HTTP::Request.new("GET", path, headers)
@@ -307,26 +352,40 @@ class HTTP::WebSocket::Protocol
       unless handshake_response.headers["Sec-WebSocket-Accept"]? == challenge_response
         raise Socket::Error.new("Handshake got denied. Server did not verify WebSocket challenge.")
       end
+
+      if protocols && !protocols.empty?
+        if server_protocol = handshake_response.headers["Sec-WebSocket-Protocol"]?
+          unless protocols.includes?(server_protocol)
+            raise Socket::Error.new("Handshake got denied. Server responded with an invalid Sec-WebSocket-Protocol.")
+          end
+          accepted_protocol = server_protocol
+        else
+          raise Socket::Error.new("Handshake got denied. Server did not respond with Sec-WebSocket-Protocol.")
+        end
+      end
     rescue exc
       socket.close
       raise exc
     end
 
-    new(socket, masked: true)
+    new(socket, masked: true, protocol: accepted_protocol)
   end
 
-  def self.new(uri : URI | String, headers = HTTP::Headers.new)
+  def self.new(uri : URI | String, headers : HTTP::Headers = HTTP::Headers.new) : self
     uri = URI.parse(uri) if uri.is_a?(String)
 
     if (host = uri.hostname) && (path = uri.request_target)
       tls = uri.scheme.in?("https", "wss")
+      if (user = uri.user) && (password = uri.password)
+        headers["Authorization"] ||= "Basic #{Base64.strict_encode("#{user}:#{password}")}"
+      end
       return new(host, path, uri.port, tls, headers)
     end
 
     raise ArgumentError.new("No host or path specified which are required.")
   end
 
-  def self.key_challenge(key)
+  def self.key_challenge(key : String) : String
     {% if flag?(:without_openssl) %}
       ::Crystal::Digest::SHA1.base64digest(key + GUID)
     {% else %}

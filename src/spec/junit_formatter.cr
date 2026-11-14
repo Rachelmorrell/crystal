@@ -6,7 +6,7 @@ module Spec
     @started_at = Time.utc
 
     @results = [] of Spec::Result
-    @summary = {} of Symbol => Int32
+    @summary = {} of Status => Int32
 
     def report(result)
       current = @summary[result.kind]? || 0
@@ -18,9 +18,9 @@ module Spec
       io = @io
       io.puts %(<?xml version="1.0"?>)
       io << %(<testsuite tests=") << @results.size
-      io << %(" skipped=") << (@summary[:pending]? || 0)
-      io << %(" errors=") << (@summary[:error]? || 0)
-      io << %(" failures=") << (@summary[:fail]? || 0)
+      io << %(" skipped=") << (@summary[Status::Pending]? || 0)
+      io << %(" errors=") << (@summary[Status::Error]? || 0)
+      io << %(" failures=") << (@summary[Status::Fail]? || 0)
       io << %(" time=") << elapsed_time.total_seconds
       io << %(" timestamp=") << @started_at.to_rfc3339
       io << %(" hostname=") << System.hostname
@@ -34,14 +34,14 @@ module Spec
       io.close
     end
 
-    def self.file(output_path : Path)
+    def self.file(cli : CLI, output_path : Path)
       if output_path.extension != ".xml"
         output_path = output_path.join("output.xml")
       end
 
       Dir.mkdir_p(output_path.dirname)
       file = File.new(output_path, "w")
-      JUnitFormatter.new(file)
+      JUnitFormatter.new(cli, file)
     end
 
     private def escape_xml_attr(value)
@@ -67,6 +67,8 @@ module Spec
       HTML.escape(classname(result), io)
       io << %(" name=")
       HTML.escape(escape_xml_attr(result.description), io)
+      io << %(" line=")
+      io << result.line
 
       if elapsed = result.elapsed
         io << %(" time=")
@@ -76,7 +78,7 @@ module Spec
       if tag = inner_content_tag(result.kind)
         io.puts %(">)
 
-        if (exception = result.exception) && result.kind != :pending
+        if (exception = result.exception) && !result.kind.pending?
           write_inner_content(tag, exception, io)
         else
           io << "    <" << tag << "/>\n"
@@ -89,10 +91,10 @@ module Spec
 
     private def inner_content_tag(kind)
       case kind
-      when :error   then "error"
-      when :fail    then "failure"
-      when :pending then "skipped"
-      else               nil
+      in .error?   then "error"
+      in .fail?    then "failure"
+      in .pending? then "skipped"
+      in .success? then nil
       end
     end
 
@@ -104,7 +106,7 @@ module Spec
         HTML.escape(message, io)
         io << '"'
       end
-      if tag == :error
+      if tag == "error"
         io << %( type=")
         io << exception.class.name
         io << '"'

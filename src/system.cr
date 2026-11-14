@@ -10,7 +10,7 @@ module System
   # ```
   # System.hostname # => "host.example.org"
   # ```
-  def self.hostname
+  def self.hostname : String
     Crystal::System.hostname
   end
 
@@ -19,7 +19,7 @@ module System
   # ```
   # System.cpu_count # => 4
   # ```
-  def self.cpu_count
-    Crystal::System.cpu_count
+  def self.cpu_count : Int32
+    Crystal::System.cpu_count.to_i32!
   end
 end

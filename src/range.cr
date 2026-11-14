@@ -10,6 +10,8 @@
 # ...y  # a beginless exclusive range, in mathematics: < y
 # ```
 #
+# See [`Range` literals](https://crystal-lang.org/reference/syntax_and_semantics/literals/range.html) in the language reference.
+#
 # An easy way to remember which one is inclusive and which one is exclusive it
 # to think of the extra dot as if it pushes *y* further away, thus leaving it outside of the range.
 #
@@ -106,11 +108,7 @@ struct Range(B, E)
   # (10..15).each { |n| print n, ' ' }
   # # prints: 10 11 12 13 14 15
   # ```
-  def each : Nil
-    {% if B == Nil %}
-      {% raise "Can't each beginless range" %}
-    {% end %}
-
+  def each(&) : Nil
     current = @begin
     if current.nil?
       raise ArgumentError.new("Can't each beginless range")
@@ -140,10 +138,6 @@ struct Range(B, E)
   # (1..3).each.skip(1).to_a # => [2, 3]
   # ```
   def each
-    {% if B == Nil %}
-      {% raise "Can't each beginless range" %}
-    {% end %}
-
     if @begin.nil?
       raise ArgumentError.new("Can't each beginless range")
     end
@@ -158,11 +152,7 @@ struct Range(B, E)
   # (10...15).reverse_each { |n| print n, ' ' }
   # # prints: 14 13 12 11 10
   # ```
-  def reverse_each : Nil
-    {% if E == Nil %}
-      {% raise "Can't reverse_each endless range" %}
-    {% end %}
-
+  def reverse_each(&) : Nil
     end_value = @end
     if end_value.nil?
       raise ArgumentError.new("Can't reverse_each endless range")
@@ -173,17 +163,15 @@ struct Range(B, E)
     yield end_value if !@exclusive && (begin_value.nil? || !(end_value < begin_value))
     current = end_value
 
-    # TODO: The macro interpolations are a workaround until #9324 is fixed.
-
     {% if B == Nil %}
       while true
         current = current.pred
-        {{ "yield current".id }}
+        yield current
       end
     {% else %}
       while begin_value.nil? || begin_value < current
         current = current.pred
-        {{ "yield current".id }}
+        yield current
       end
     {% end %}
   end
@@ -194,10 +182,6 @@ struct Range(B, E)
   # (1..3).reverse_each.skip(1).to_a # => [2, 1]
   # ```
   def reverse_each
-    {% if E == Nil %}
-      {% raise "Can't reverse_each endless range" %}
-    {% end %}
-
     if @end.nil?
       raise ArgumentError.new("Can't reverse_each endless range")
     end
@@ -230,12 +214,13 @@ struct Range(B, E)
     if current.nil?
       raise ArgumentError.new("Can't step beginless range")
     end
+    raise ArgumentError.new("Zero step size") if by.zero?
 
-    if current.is_a?(Steppable)
+    {% if B < Steppable %}
       current.step(to: @end, by: by, exclusive: @exclusive) do |x|
         yield x
       end
-    else
+    {% else %}
       end_value = @end
       while end_value.nil? || current < end_value
         yield current
@@ -251,7 +236,7 @@ struct Range(B, E)
         end
       end
       yield current if !@exclusive && current == @end
-    end
+    {% end %}
   end
 
   # :ditto:
@@ -260,12 +245,13 @@ struct Range(B, E)
     if start.nil?
       raise ArgumentError.new("Can't step beginless range")
     end
+    raise ArgumentError.new("Zero step size") if by.zero?
 
-    if start.is_a?(Steppable)
+    {% if B < Steppable %}
       start.step(to: @end, by: by, exclusive: @exclusive)
-    else
+    {% else %}
       StepIterator(self, B, typeof(by)).new(self, by)
-    end
+    {% end %}
   end
 
   # Returns `true` if this range excludes the *end* element.
@@ -274,8 +260,37 @@ struct Range(B, E)
   # (1..10).excludes_end?  # => false
   # (1...10).excludes_end? # => true
   # ```
-  def excludes_end?
+  def excludes_end? : Bool
     @exclusive
+  end
+
+  # Returns `true` if this range and *other* have at least one value in common.
+  #
+  # ```
+  # (1..5).overlaps?(5..10)  # => true
+  # (1...5).overlaps?(5..10) # => false
+  # (1...1).overlaps?(1..1)  # => false
+  # ```
+  def overlaps?(other : Range) : Bool
+    return false if empty_without_iterating?
+    return false if other.empty_without_iterating?
+
+    if (begin_value = @begin) && (other_end = other.end)
+      return false if other.exclusive? ? other_end <= begin_value : other_end < begin_value
+    end
+
+    if (end_value = @end) && (other_begin = other.begin)
+      return false if @exclusive ? end_value <= other_begin : end_value < other_begin
+    end
+
+    true
+  end
+
+  protected def empty_without_iterating? : Bool
+    return false unless begin_value = @begin
+    return false unless end_value = @end
+
+    @exclusive ? begin_value >= end_value : begin_value > end_value
   end
 
   # Returns `true` if this range includes the given *value*.
@@ -288,7 +303,7 @@ struct Range(B, E)
   # (1...10).includes?(9)  # => true
   # (1...10).includes?(10) # => false
   # ```
-  def includes?(value)
+  def includes?(value) : Bool
     begin_value = @begin
     end_value = @end
 
@@ -325,14 +340,12 @@ struct Range(B, E)
     includes?(value)
   end
 
-  # :nodoc:
   def to_s(io : IO) : Nil
     @begin.try &.inspect(io)
     io << (@exclusive ? "..." : "..")
     @end.try &.inspect(io)
   end
 
-  # :nodoc:
   def inspect(io : IO) : Nil
     to_s(io)
   end
@@ -362,15 +375,13 @@ struct Range(B, E)
   # the method simply calls `random.rand(self)`.
   #
   # Raises `ArgumentError` if `self` is an open range.
-  def sample(random = Random::DEFAULT)
-    {% if B == Nil || E == Nil %}
-      {% raise "Can't sample an open range" %}
-    {% end %}
+  def sample(random : Random? = nil)
+    rng = random || Random.thread_default
 
     {% if B < Int && E < Int %}
-      random.rand(self)
+      rng.rand(self)
     {% elsif B < Float && E < Float %}
-      random.rand(self)
+      rng.rand(self)
     {% elsif B.nilable? || E.nilable? %}
       b = self.begin
       e = self.end
@@ -379,28 +390,99 @@ struct Range(B, E)
         raise ArgumentError.new("Can't sample an open range")
       end
 
-      Range.new(b, e, @exclusive).sample(random)
+      Range.new(b, e, @exclusive).sample(rng)
     {% else %}
-      super
+      super(rng)
     {% end %}
   end
 
-  # :nodoc:
-  def sample(n : Int, random = Random::DEFAULT)
-    {% if B == Nil || E == Nil %}
-      {% raise "Can't sample an open range" %}
-    {% end %}
+  # :inherit:
+  #
+  # If `self` is not empty and `n` is equal to 1, calls `sample(random)` exactly
+  # once. Thus, *random* will be left in a different state compared to the
+  # implementation in `Enumerable`.
+  def sample(n : Int, random : Random? = nil)
+    rng = random || Random.thread_default
 
     if self.begin.nil? || self.end.nil?
       raise ArgumentError.new("Can't sample an open range")
     end
 
-    return super unless n == 1
+    if n < 0
+      raise ArgumentError.new "Can't sample negative number of elements"
+    end
 
-    if empty?
-      [] of B
+    # For a range of integers we can do much better
+    {% if B < Int && E < Int %}
+      min = self.begin
+      max = self.end
+
+      if exclusive? ? max <= min : max < min
+        raise ArgumentError.new "Invalid range for rand: #{self}"
+      end
+
+      max -= 1 if exclusive?
+
+      available = max - min + 1
+
+      # When a big chunk of elements is going to be needed, it's
+      # faster to just traverse the entire range than hitting
+      # a lot of duplicates because or random.
+      if n >= available // 4
+        return super(n, rng)
+      end
+
+      possible = Math.min(n, available)
+
+      # If we must return all values in the range...
+      if possible == available
+        result = Array(B).new(possible) { |i| min + i }
+        result.shuffle!(rng)
+        return result
+      end
+
+      range_sample(n, rng)
+    {% elsif B < Float && E < Float %}
+      min = self.begin
+      max = self.end
+
+      if exclusive? ? max <= min : max < min
+        raise ArgumentError.new "Invalid range for rand: #{self}"
+      end
+
+      if min == max
+        return [min]
+      end
+
+      range_sample(n, rng)
+    {% else %}
+      case n
+      when 0
+        [] of B
+      when 1
+        [sample(rng)]
+      else
+        super(n, rng)
+      end
+    {% end %}
+  end
+
+  private def range_sample(n, random)
+    if n <= 16
+      # For a small requested amount doing a linear lookup is faster
+      result = Array(B).new(n)
+      until result.size == n
+        value = sample(random)
+        result << value unless result.includes?(value)
+      end
+      result
     else
-      [sample(random)]
+      # Otherwise using a Set is faster
+      result = Set(B).new(n)
+      until result.size == n
+        result << sample(random)
+      end
+      result.to_a
     end
   end
 
@@ -409,7 +491,6 @@ struct Range(B, E)
     Range.new(@begin.clone, @end.clone, @exclusive)
   end
 
-  # :nodoc:
   def map(&block : B -> U) forall U
     b = self.begin
     e = self.end
@@ -425,20 +506,35 @@ struct Range(B, E)
     end
   end
 
-  # :nodoc:
-  def size
-    {% if B == Nil || E == Nil %}
-      {% raise "Can't calculate size of an open range" %}
-    {% end %}
-
+  # Returns the number of values in this range.
+  #
+  # If both the beginning and the end of this range are `Int`s, runs in constant
+  # time instead of linear.
+  #
+  # ```
+  # (3..8).size  # => 6
+  # (3...8).size # => 5
+  # ```
+  #
+  # Raises `OverflowError` if the difference is bigger than `Int32`.
+  # Raises `ArgumentError` if either `begin` or `end` are `nil`.
+  def size : Int32
     b = self.begin
     e = self.end
 
     # Optimized implementation for int range
     if b.is_a?(Int) && e.is_a?(Int)
-      e -= 1 if @exclusive
-      n = e - b + 1
-      n < 0 ? 0 : n
+      return 0 if e < b
+
+      # Convert `e` to `Int32` in order to ensure that `e - b` doesn't get
+      # truncated due to the smaller type of `e`.
+      if e.is_a?(UInt8 | Int8 | UInt16 | Int16)
+        e = e.to_i32!
+      end
+
+      diff = (e - b).to_i32.abs
+      diff += 1 unless @exclusive
+      diff
     else
       if b.nil? || e.nil?
         raise ArgumentError.new("Can't calculate size of an open range")
@@ -496,7 +592,7 @@ struct Range(B, E)
       begin_value = @range.begin
 
       return stop if !begin_value.nil? && @current <= begin_value
-      return @current = @current.pred
+      @current = @current.pred
     end
   end
 

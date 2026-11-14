@@ -9,6 +9,7 @@ lib LibC
   F_SETFL    =       4
   FD_CLOEXEC =       1
   O_CLOEXEC  = 0x20000
+  O_EXCL     =  0x0800
   O_TRUNC    =  0x0400
   O_CREAT    =  0x0200
   O_NOFOLLOW =  0x0100
@@ -18,6 +19,13 @@ lib LibC
   O_RDWR     =  0x0002
   O_WRONLY   =  0x0001
   O_RDONLY   =  0x0000
+
+  # Constants used by "at" family of system calls.
+  AT_FDCWD            = 0xFFFAFDCD # invalid file descriptor
+  AT_SYMLINK_NOFOLLOW =          1
+  AT_REMOVEDIR        =          2
+  AT_EACCESS          =          4
+  AT_SYMLINK_FOLLOW   =          8
 
   struct Flock
     l_start : OffT

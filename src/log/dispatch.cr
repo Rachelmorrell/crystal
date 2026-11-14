@@ -14,7 +14,7 @@ class Log
     end
 
     # :nodoc:
-    def self.for(mode : DispatchMode)
+    def self.for(mode : DispatchMode) : self
       case mode
       in .sync?
         SyncDispatcher.new
@@ -36,7 +36,7 @@ class Log
   module DirectDispatcher
     extend Dispatcher
 
-    def self.dispatch(entry : Entry, backend : Backend)
+    def self.dispatch(entry : Entry, backend : Backend) : Nil
       backend.write(entry)
     end
   end
@@ -51,7 +51,7 @@ class Log
       spawn write_logs
     end
 
-    def dispatch(entry : Entry, backend : Backend)
+    def dispatch(entry : Entry, backend : Backend) : Nil
       @channel.send({entry, backend})
     end
 
@@ -64,7 +64,7 @@ class Log
       @done.send nil
     end
 
-    def close
+    def close : Nil
       # TODO: this might fail if being closed from different threads
       unless @channel.closed?
         @channel.close
@@ -72,7 +72,7 @@ class Log
       end
     end
 
-    def finalize
+    def finalize : Nil
       close
     end
   end
@@ -83,7 +83,7 @@ class Log
     include Dispatcher
 
     def initialize
-      @mutex = Mutex.new(:unchecked)
+      @mutex = Sync::Mutex.new(:unchecked)
     end
 
     def dispatch(entry : Entry, backend : Backend)

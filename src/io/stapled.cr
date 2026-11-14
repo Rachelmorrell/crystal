@@ -30,10 +30,10 @@ class IO::Stapled < IO
   end
 
   # Reads a slice from `reader`.
-  def read(slice : Bytes)
+  def read(slice : Bytes) : Int32
     check_open
 
-    @reader.read(slice)
+    @reader.read(slice).to_i32
   end
 
   # Gets a string from `reader`.
@@ -65,7 +65,7 @@ class IO::Stapled < IO
   end
 
   # Writes a byte to `writer`.
-  def write_byte(byte : UInt8)
+  def write_byte(byte : UInt8) : Nil
     check_open
 
     @writer.write_byte(byte)
@@ -107,7 +107,7 @@ class IO::Stapled < IO
   #
   # Both endpoints and the underlying `IO`s are closed after the block
   # (even if `sync_close?` is `false`).
-  def self.pipe(read_blocking : Bool = false, write_blocking : Bool = false)
+  def self.pipe(read_blocking : Bool? = nil, write_blocking : Bool? = nil, &)
     IO.pipe(read_blocking, write_blocking) do |a_read, a_write|
       IO.pipe(read_blocking, write_blocking) do |b_read, b_write|
         a, b = new(a_read, b_write, true), new(b_read, a_write, true)
@@ -123,7 +123,7 @@ class IO::Stapled < IO
 
   # Creates a pair of bidirectional pipe endpoints connected with each other
   # and returns them in a `Tuple`.
-  def self.pipe(read_blocking : Bool = false, write_blocking : Bool = false) : {self, self}
+  def self.pipe(read_blocking : Bool? = nil, write_blocking : Bool? = nil) : {self, self}
     a_read, a_write = IO.pipe(read_blocking, write_blocking)
     b_read, b_write = IO.pipe(read_blocking, write_blocking)
     return new(a_read, b_write, true), new(b_read, a_write, true)

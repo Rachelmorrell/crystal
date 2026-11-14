@@ -1,4 +1,4 @@
-require "spec"
+require "../spec_helper"
 require "csv"
 
 class CSV::Lexer
@@ -15,6 +15,17 @@ class CSV::Lexer
   def expect_newline(file = __FILE__, line = __LINE__)
     next_token.kind.should eq(CSV::Token::Kind::Newline), file: file, line: line
   end
+end
+
+private def expect_csv_error(source, message, line_number, column_number)
+  lexer = CSV::Lexer.new(source)
+  error = expect_raises CSV::MalformedCSVError, "#{message} at line #{line_number}, column #{column_number}" do
+    loop do
+      break if lexer.next_token.kind == CSV::Token::Kind::Eof
+    end
+  end
+  error.line_number.should eq(line_number)
+  error.column_number.should eq(column_number)
 end
 
 describe CSV do
@@ -101,10 +112,11 @@ describe CSV do
       lexer.expect_eof
     end
 
-    it "lexes newline and eof as a single eof" do
+    it "lexes newline followed by eof" do
       lexer = CSV::Lexer.new("hello,world\n")
       lexer.expect_cell "hello"
       lexer.expect_cell "world"
+      lexer.expect_newline
       lexer.expect_eof
     end
 
@@ -112,12 +124,14 @@ describe CSV do
       lexer = CSV::Lexer.new("hello;world\n", separator: ';')
       lexer.expect_cell "hello"
       lexer.expect_cell "world"
+      lexer.expect_newline
       lexer.expect_eof
     end
 
     it "lexes with a given quote char" do
       lexer = CSV::Lexer.new("'hello,world'\n", quote_char: '\'')
       lexer.expect_cell "hello,world"
+      lexer.expect_newline
       lexer.expect_eof
     end
 
@@ -140,6 +154,38 @@ describe CSV do
         lexer = CSV::Lexer.new %("foo)
         lexer.next_token
       end
+    end
+
+    pending_wasm32 "reports correct error locations after CRLF" do
+      input = "foo,bar\r\nhel\"lo,baz"
+
+      expect_csv_error input, "Unexpected quote", 2, 4
+      expect_csv_error IO::Memory.new(input), "Unexpected quote", 2, 4
+    end
+
+    pending_wasm32 "reports correct error locations after CRLF in quoted cells" do
+      input = %("foo\r\nbar"x)
+
+      expect_csv_error input, "Expecting comma, newline or end, not 'x'", 2, 5
+      expect_csv_error IO::Memory.new(input), "Expecting comma, newline or end, not 'x'", 2, 5
+    end
+
+    it "doesn't consume char after \\n (#11172)" do
+      io = IO::Memory.new("a\nx")
+      lexer = CSV::Lexer.new(io)
+      lexer.expect_cell "a"
+      lexer.expect_newline
+      io.pos.should eq(2)
+    end
+
+    it "doesn't consume char after \\r (#11172)" do
+      io = IO::Memory.new("a\r\nx")
+      lexer = CSV::Lexer.new(io)
+      lexer.expect_cell "a"
+      io.pos.should eq(2)
+      lexer.expect_newline
+      lexer.expect_cell "x"
+      lexer.expect_eof
     end
   end
 end

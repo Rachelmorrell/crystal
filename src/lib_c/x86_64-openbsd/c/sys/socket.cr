@@ -7,6 +7,7 @@ lib LibC
   SOCK_STREAM    =      1
   SOL_SOCKET     = 0xffff
   SO_BROADCAST   = 0x0020
+  SO_ERROR       = 0x1007
   SO_KEEPALIVE   = 0x0008
   SO_LINGER      = 0x0080
   SO_RCVBUF      = 0x1002
@@ -27,6 +28,7 @@ lib LibC
   SHUT_RDWR      =      2
   SHUT_WR        =      1
   SOCK_CLOEXEC   = 0x8000
+  SOCK_NONBLOCK  = 0x4000
 
   alias SocklenT = UInt
   alias SaFamilyT = Char
@@ -51,6 +53,7 @@ lib LibC
   end
 
   fun accept(x0 : Int, x1 : Sockaddr*, x2 : SocklenT*) : Int
+  fun accept4(x0 : Int, x1 : Sockaddr*, x2 : SocklenT*, x3 : Int) : Int
   fun bind(x0 : Int, x1 : Sockaddr*, x2 : SocklenT) : Int
   fun connect(x0 : Int, x1 : Sockaddr*, x2 : SocklenT) : Int
   fun getpeername(x0 : Int, x1 : Sockaddr*, x2 : SocklenT*) : Int

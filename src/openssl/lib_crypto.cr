@@ -1,9 +1,31 @@
+# Supported library versions:
+#
+# * openssl (1.1.0–4.0+)
+# * libressl (2.0–4.0+)
+#
+# See https://crystal-lang.org/reference/man/required_libraries.html#tls
 {% begin %}
   lib LibCrypto
-    {% from_libressl = (`hash pkg-config 2> /dev/null || printf %s false` != "false") &&
-                       (`test -f $(pkg-config --silence-errors --variable=includedir libcrypto)/openssl/opensslv.h || printf %s false` != "false") &&
-                       (`printf "#include <openssl/opensslv.h>\nLIBRESSL_VERSION_NUMBER" | ${CC:-cc} $(pkg-config --cflags --silence-errors libcrypto || true) -E -`.chomp.split('\n').last != "LIBRESSL_VERSION_NUMBER") %}
-    {% ssl_version = `hash pkg-config 2> /dev/null && pkg-config --silence-errors --modversion libcrypto || printf %s 0.0.0`.split.last.gsub(/[^0-9.]/, "") %}
+    {% if flag?(:msvc) %}
+      {% from_libressl = false %}
+      {% ssl_version = nil %}
+      {% for dir in Crystal::LIBRARY_PATH.split(Crystal::System::Process::HOST_PATH_DELIMITER) %}
+        {% unless ssl_version %}
+          {% config_path = "#{dir.id}\\openssl_VERSION" %}
+          {% if config_version = read_file?(config_path) %}
+            {% ssl_version = config_version.chomp %}
+          {% end %}
+        {% end %}
+      {% end %}
+      {% ssl_version ||= "0.0.0" %}
+    {% else %}
+      # these have to be wrapped in `sh -c` since for MinGW-w64 the compiler
+      # passes the command string to `LibC.CreateProcessW`
+      {% from_libressl = (`sh -c 'hash pkg-config 2> /dev/null || printf %s false'` != "false") &&
+                         (`sh -c 'test -f $(pkg-config --silence-errors --variable=includedir libcrypto)/openssl/opensslv.h || printf %s false'` != "false") &&
+                         (`sh -c 'printf "#include <openssl/opensslv.h>\nLIBRESSL_VERSION_NUMBER" | ${CC:-cc} $(pkg-config --cflags --silence-errors libcrypto || true) -E -'`.chomp.split('\n').last != "LIBRESSL_VERSION_NUMBER") %}
+      {% ssl_version = `sh -c 'hash pkg-config 2> /dev/null && pkg-config --silence-errors --modversion libcrypto || printf %s 0.0.0'`.split.last.gsub(/[^0-9.]/, "").gsub(/\.0(\d)/, ".\\1") %}
+    {% end %}
 
     {% if from_libressl %}
       LIBRESSL_VERSION = {{ ssl_version }}
@@ -12,10 +34,22 @@
       LIBRESSL_VERSION = "0.0.0"
       OPENSSL_VERSION = {{ ssl_version }}
     {% end %}
+
+    VERSION_MAJOR = {{ ssl_version.gsub(/[^0-9].*/, "") }}
   end
 {% end %}
 
-@[Link(ldflags: "`command -v pkg-config > /dev/null && pkg-config --libs --silence-errors libcrypto || printf %s '-lcrypto'`")]
+{% if flag?(:win32) %}
+  @[Link("crypto")]
+  @[Link("crypt32")] # CertOpenStore, ...
+  @[Link("user32")]  # GetProcessWindowStation, GetUserObjectInformationW, _MessageBoxW
+{% else %}
+  @[Link(ldflags: "`command -v pkg-config > /dev/null && pkg-config --libs --silence-errors libcrypto || printf %s '-lcrypto'`")]
+{% end %}
+{% if compare_versions(Crystal::VERSION, "1.11.0-dev") >= 0 %}
+  {% suffix = flag?(:aarch64) ? "arm64" : "x64" %}
+  @[Link(dll: {{ "libcrypto-#{LibCrypto::VERSION_MAJOR.id}-#{suffix.id}.dll" }})]
+{% end %}
 lib LibCrypto
   alias Char = LibC::Char
   alias Int = LibC::Int
@@ -28,11 +62,23 @@ lib LibCrypto
   type X509_EXTENSION = Void*
   type X509_NAME = Void*
   type X509_NAME_ENTRY = Void*
+  type X509_STORE = Void*
   type X509_STORE_CTX = Void*
+
+  BIO_TYPE_DESCRIPTOR  = 0x0100
+  BIO_TYPE_SOURCE_SINK = 0x0400
+
+  BIO_FLAGS_KTLS_TX_CTRL_MSG          = 0x1000
+  BIO_FLAGS_KTLS_RX                   = 0x2000
+  BIO_FLAGS_KTLS_TX                   = 0x4000
+  BIO_FLAGS_KTLS_TX_ZEROCOPY_SENDFILE = 0x8000
 
   struct Bio
     method : Void*
-    callback : (Void*, Int, Char*, Int, Long, Long) -> Long
+    callback : BIO_callback_fn
+    {% if compare_versions(LIBRESSL_VERSION, "3.5.0") >= 0 %}
+      callback_ex : BIO_callback_fn_ex
+    {% end %}
     cb_arg : Char*
     init : Int
     shutdown : Int
@@ -47,64 +93,67 @@ lib LibCrypto
     num_write : ULong
   end
 
-  PKCS5_SALT_LEN     =  8
-  EVP_MAX_KEY_LENGTH = 32
-  EVP_MAX_IV_LENGTH  = 16
+  alias BIO_callback_fn = (Bio*, Int, Char*, Int, Long, Long) -> Long
+  alias BIO_callback_fn_ex = (Bio*, Int, Char, SizeT, Int, Long, Int, SizeT*) -> Long
 
-  CTRL_PUSH  =  6
-  CTRL_POP   =  7
-  CTRL_FLUSH = 11
+  PKCS5_SALT_LEN      =  8
+  EVP_MAX_KEY_LENGTH  = 32
+  EVP_MAX_IV_LENGTH   = 16
+  EVP_GCM_TLS_TAG_LEN = 16
 
-  alias BioMethodWrite = (Bio*, Char*, SizeT, SizeT*) -> Int
-  alias BioMethodWriteOld = (Bio*, Char*, Int) -> Int
-  alias BioMethodRead = (Bio*, Char*, SizeT, SizeT*) -> Int
-  alias BioMethodReadOld = (Bio*, Char*, Int) -> Int
-  alias BioMethodPuts = (Bio*, Char*) -> Int
-  alias BioMethodGets = (Bio*, Char*, Int) -> Int
-  alias BioMethodCtrl = (Bio*, Int, Long, Void*) -> Long
-  alias BioMethodCreate = Bio* -> Int
-  alias BioMethodDestroy = Bio* -> Int
-  alias BioMethodCallbackCtrl = (Bio*, Int, Void*) -> Long
+  EVP_CTRL_GCM_GET_TAG = 0x10
+  EVP_CTRL_GCM_SET_TAG = 0x11
 
-  {% if compare_versions(LibCrypto::OPENSSL_VERSION, "1.1.0") >= 0 %}
-    type BioMethod = Void
-  {% else %}
-    struct BioMethod
-      type_id : Int
-      name : Char*
-      bwrite : BioMethodWriteOld
-      bread : BioMethodReadOld
-      bputs : BioMethodPuts
-      bgets : BioMethodGets
-      ctrl : BioMethodCtrl
-      create : BioMethodCreate
-      destroy : BioMethodDestroy
-      callback_ctrl : BioMethodCallbackCtrl
-    end
-  {% end %}
+  SSL3_RT_HEADER_LENGTH = 5
+
+  TLS1_2_VERSION_MAJOR = 0x03
+  TLS1_2_VERSION_MINOR = 0x03
+
+  CTRL_EOF                           =   2
+  CTRL_PUSH                          =   6
+  CTRL_POP                           =   7
+  CTRL_FLUSH                         =  11
+  CTRL_SET_KTLS                      =  72
+  CTRL_GET_KTLS_SEND                 =  73
+  CTRL_SET_KTLS_TX_SEND_CTRL_MSG     =  74
+  CTRL_CLEAR_KTLS_TX_CTRL_MSG        =  75
+  CTRL_GET_KTLS_RECV                 =  76
+  CTRL_SET_KTLS_TX_ZEROCOPY_SENDFILE =  90
+  BIO_C_GET_FD                       = 105
+
+  type BioMethod = Void
 
   fun BIO_new(BioMethod*) : Bio*
   fun BIO_free(Bio*) : Int
+
   fun BIO_set_data(Bio*, Void*)
   fun BIO_get_data(Bio*) : Void*
   fun BIO_set_init(Bio*, Int)
   fun BIO_set_shutdown(Bio*, Int)
 
-  {% if compare_versions(LibCrypto::OPENSSL_VERSION, "1.1.0") >= 0 %}
-    fun BIO_meth_new(Int, Char*) : BioMethod*
-    fun BIO_meth_set_read(BioMethod*, BioMethodReadOld)
-    fun BIO_meth_set_write(BioMethod*, BioMethodWriteOld)
-    fun BIO_meth_set_puts(BioMethod*, BioMethodPuts)
-    fun BIO_meth_set_gets(BioMethod*, BioMethodGets)
-    fun BIO_meth_set_ctrl(BioMethod*, BioMethodCtrl)
-    fun BIO_meth_set_create(BioMethod*, BioMethodCreate)
-    fun BIO_meth_set_destroy(BioMethod*, BioMethodDestroy)
-    fun BIO_meth_set_callback_ctrl(BioMethod*, BioMethodCallbackCtrl)
+  fun BIO_set_flags(Bio*, Int)
+  fun BIO_test_flags(Bio*, Int) : Int
+  fun BIO_clear_flags(Bio*, Int)
+
+  fun BIO_ctrl(Bio*, Int, Long, Void*) : Long
+
+  fun BIO_get_new_index : Int
+  fun BIO_meth_new(Int, Char*) : BioMethod*
+  fun BIO_meth_set_read(BioMethod*, (Bio*, Char*, Int) -> Int)
+  fun BIO_meth_set_write(BioMethod*, (Bio*, Char*, Int) -> Int)
+
+  {% unless compare_versions(LIBRESSL_VERSION, "0.0.0") > 0 %}
+    # LibreSSL doesn't support the _ex functions
+    fun BIO_meth_set_read_ex(BioMethod*, (Bio*, Char*, SizeT, SizeT*) -> Int)
+    fun BIO_meth_set_write_ex(BioMethod*, (Bio*, Char*, SizeT, SizeT*) -> Int)
   {% end %}
-  {% if compare_versions(LibCrypto::OPENSSL_VERSION, "1.1.1") >= 0 %}
-    fun BIO_meth_set_read_ex(BioMethod*, BioMethodRead)
-    fun BIO_meth_set_write_ex(BioMethod*, BioMethodWrite)
-  {% end %}
+
+  fun BIO_meth_set_puts(BioMethod*, (Bio*, Char*) -> Int)
+  fun BIO_meth_set_gets(BioMethod*, (Bio*, Char*, Int) -> Int)
+  fun BIO_meth_set_ctrl(BioMethod*, (Bio*, Int, Long, Void*) -> Long)
+  fun BIO_meth_set_create(BioMethod*, (Bio*) -> Int)
+  fun BIO_meth_set_destroy(BioMethod*, (Bio*) -> Int)
+  fun BIO_meth_set_callback_ctrl(BioMethod*, (Bio*, Int, Void*) -> Long)
 
   fun sha1 = SHA1(data : Char*, length : SizeT, md : Char*) : Char*
 
@@ -130,9 +179,13 @@ lib LibCrypto
   fun obj_obj2nid = OBJ_obj2nid(obj : ASN1_OBJECT) : Int
   fun obj_ln2nid = OBJ_ln2nid(ln : Char*) : Int
   fun obj_sn2nid = OBJ_sn2nid(sn : Char*) : Int
+  fun obj_find_sigid_algs = OBJ_find_sigid_algs(sigid : Int32, pdig_nid : Int32*, ppkey_nid : Int32*) : Int32
 
   fun asn1_object_free = ASN1_OBJECT_free(obj : ASN1_OBJECT)
-  fun asn1_string_data = ASN1_STRING_data(x : ASN1_STRING) : Char*
+  {% if compare_versions(OPENSSL_VERSION, "4.0.0") < 0 %}
+    fun asn1_string_data = ASN1_STRING_data(x : ASN1_STRING) : Char*
+  {% end %}
+  fun asn1_string_get0_data = ASN1_STRING_get0_data(x : ASN1_STRING) : Char*
   fun asn1_string_length = ASN1_STRING_length(x : ASN1_STRING) : Int
   fun asn1_string_print = ASN1_STRING_print(out : Bio*, v : ASN1_STRING) : Int
   fun i2t_asn1_object = i2t_ASN1_OBJECT(buf : Char*, buf_len : Int, a : ASN1_OBJECT) : Int
@@ -165,29 +218,43 @@ lib LibCrypto
   fun hmac_final = HMAC_Final(ctx : HMAC_CTX, md : UInt8*, len : UInt32*) : Int32
   fun hmac_ctx_copy = HMAC_CTX_copy(dst : HMAC_CTX, src : HMAC_CTX) : Int32
 
+  fun x509_digest = X509_digest(x509 : X509, evp_md : EVP_MD, hash : UInt8*, len : Int32*) : Int32
   fun evp_get_digestbyname = EVP_get_digestbyname(name : UInt8*) : EVP_MD
   fun evp_digestinit_ex = EVP_DigestInit_ex(ctx : EVP_MD_CTX, type : EVP_MD, engine : Void*) : Int32
   fun evp_digestupdate = EVP_DigestUpdate(ctx : EVP_MD_CTX, data : UInt8*, count : LibC::SizeT) : Int32
   fun evp_md_ctx_copy = EVP_MD_CTX_copy(dst : EVP_MD_CTX, src : EVP_MD_CTX) : Int32
   fun evp_md_ctx_md = EVP_MD_CTX_md(ctx : EVP_MD_CTX) : EVP_MD
-  fun evp_md_size = EVP_MD_size(md : EVP_MD) : Int32
-  fun evp_md_block_size = EVP_MD_block_size(md : EVP_MD) : LibC::Int
-  fun evp_digestfinal_ex = EVP_DigestFinal_ex(ctx : EVP_MD_CTX, md : UInt8*, size : UInt32*) : Int32
 
-  {% if compare_versions(OPENSSL_VERSION, "1.1.0") >= 0 %}
-    fun evp_md_ctx_new = EVP_MD_CTX_new : EVP_MD_CTX
-    fun evp_md_ctx_free = EVP_MD_CTX_free(ctx : EVP_MD_CTX)
+  {% if compare_versions(OPENSSL_VERSION, "3.0.0") >= 0 %}
+    fun evp_md_size = EVP_MD_get_size(md : EVP_MD) : Int32
+    fun evp_md_block_size = EVP_MD_get_block_size(md : EVP_MD) : LibC::Int
   {% else %}
-    fun evp_md_ctx_new = EVP_MD_CTX_create : EVP_MD_CTX
-    fun evp_md_ctx_free = EVP_MD_CTX_destroy(ctx : EVP_MD_CTX)
+    fun evp_md_size = EVP_MD_size(md : EVP_MD) : Int32
+    fun evp_md_block_size = EVP_MD_block_size(md : EVP_MD) : LibC::Int
   {% end %}
 
+  fun evp_digestfinal_ex = EVP_DigestFinal_ex(ctx : EVP_MD_CTX, md : UInt8*, size : UInt32*) : Int32
+
+  fun evp_md_ctx_new = EVP_MD_CTX_new : EVP_MD_CTX
+  fun evp_md_ctx_free = EVP_MD_CTX_free(ctx : EVP_MD_CTX)
+
   fun evp_get_cipherbyname = EVP_get_cipherbyname(name : UInt8*) : EVP_CIPHER
-  fun evp_cipher_name = EVP_CIPHER_name(cipher : EVP_CIPHER) : UInt8*
-  fun evp_cipher_nid = EVP_CIPHER_nid(cipher : EVP_CIPHER) : Int32
-  fun evp_cipher_block_size = EVP_CIPHER_block_size(cipher : EVP_CIPHER) : Int32
-  fun evp_cipher_key_length = EVP_CIPHER_key_length(cipher : EVP_CIPHER) : Int32
-  fun evp_cipher_iv_length = EVP_CIPHER_iv_length(cipher : EVP_CIPHER) : Int32
+
+  {% if compare_versions(OPENSSL_VERSION, "3.0.0") >= 0 %}
+    fun evp_cipher_name = EVP_CIPHER_get_name(cipher : EVP_CIPHER) : UInt8*
+    fun evp_cipher_nid = EVP_CIPHER_get_nid(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_block_size = EVP_CIPHER_get_block_size(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_key_length = EVP_CIPHER_get_key_length(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_iv_length = EVP_CIPHER_get_iv_length(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_flags = EVP_CIPHER_get_flags(cipher : EVP_CIPHER) : CipherFlags
+  {% else %}
+    fun evp_cipher_name = EVP_CIPHER_name(cipher : EVP_CIPHER) : UInt8*
+    fun evp_cipher_nid = EVP_CIPHER_nid(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_block_size = EVP_CIPHER_block_size(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_key_length = EVP_CIPHER_key_length(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_iv_length = EVP_CIPHER_iv_length(cipher : EVP_CIPHER) : Int32
+    fun evp_cipher_flags = EVP_CIPHER_flags(cipher : EVP_CIPHER) : CipherFlags
+  {% end %}
 
   fun evp_cipher_ctx_new = EVP_CIPHER_CTX_new : EVP_CIPHER_CTX
   fun evp_cipher_ctx_free = EVP_CIPHER_CTX_free(ctx : EVP_CIPHER_CTX)
@@ -196,6 +263,7 @@ lib LibCrypto
   fun evp_cipherfinal_ex = EVP_CipherFinal_ex(ctx : EVP_CIPHER_CTX, out : UInt8*, outl : Int32*) : Int32
   fun evp_cipher_ctx_set_padding = EVP_CIPHER_CTX_set_padding(ctx : EVP_CIPHER_CTX, padding : Int32) : Int32
   fun evp_cipher_ctx_cipher = EVP_CIPHER_CTX_cipher(ctx : EVP_CIPHER_CTX) : EVP_CIPHER
+  fun evp_cipher_ctx_ctrl = EVP_CIPHER_CTX_ctrl(ctx : EVP_CIPHER_CTX, type : Int32, arg : Int32, ptr : Void*) : Int32
 
   @[Flags]
   enum CipherFlags : ULong
@@ -209,14 +277,18 @@ lib LibCrypto
     EVP_CIPH_FLAG_PIPELINE          = 0x800000
   end
 
-  fun evp_cipher_flags = EVP_CIPHER_flags(ctx : EVP_CIPHER_CTX) : CipherFlags
-
   fun hmac = HMAC(evp : EVP_MD, key : Char*, key_len : Int,
                   d : Char*, n : SizeT, md : Char*, md_len : UInt*) : Char*
 
   fun rand_bytes = RAND_bytes(buf : Char*, num : Int) : Int
   fun err_get_error = ERR_get_error : ULong
   fun err_error_string = ERR_error_string(e : ULong, buf : Char*) : Char*
+
+  {% if compare_versions(OPENSSL_VERSION, "3.0.0") >= 0 %}
+    ERR_SYSTEM_FLAG = Int32::MAX.to_u32 + 1
+    ERR_SYSTEM_MASK = Int32::MAX.to_u32
+    ERR_REASON_MASK = 0x7FFFFF
+  {% end %}
 
   struct MD5Context
     a : UInt
@@ -233,12 +305,10 @@ lib LibCrypto
   fun md5_update = MD5_Update(c : MD5Context*, data : Void*, len : LibC::SizeT) : Int
   fun md5_final = MD5_Final(md : UInt8*, c : MD5Context*) : Int
   fun md5_transform = MD5_Transform(c : MD5Context*, b : UInt8*)
-  fun md5 = MD5(data : UInt8*, lengh : LibC::SizeT, md : UInt8*) : UInt8*
+  fun md5 = MD5(data : UInt8*, length : LibC::SizeT, md : UInt8*) : UInt8*
 
   fun pkcs5_pbkdf2_hmac_sha1 = PKCS5_PBKDF2_HMAC_SHA1(pass : LibC::Char*, passlen : LibC::Int, salt : UInt8*, saltlen : LibC::Int, iter : LibC::Int, keylen : LibC::Int, out : UInt8*) : LibC::Int
-  {% if compare_versions(OPENSSL_VERSION, "1.0.0") >= 0 %}
-    fun pkcs5_pbkdf2_hmac = PKCS5_PBKDF2_HMAC(pass : LibC::Char*, passlen : LibC::Int, salt : UInt8*, saltlen : LibC::Int, iter : LibC::Int, digest : EVP_MD, keylen : LibC::Int, out : UInt8*) : LibC::Int
-  {% end %}
+  fun pkcs5_pbkdf2_hmac = PKCS5_PBKDF2_HMAC(pass : LibC::Char*, passlen : LibC::Int, salt : UInt8*, saltlen : LibC::Int, iter : LibC::Int, digest : EVP_MD, keylen : LibC::Int, out : UInt8*) : LibC::Int
 
   NID_X9_62_prime256v1 = 415
 
@@ -259,7 +329,7 @@ lib LibCrypto
   NID_commonName       = 13
   NID_subject_alt_name = 85
 
-  {% if compare_versions(OPENSSL_VERSION, "1.1.0") >= 0 %}
+  {% if OPENSSL_VERSION != "0.0.0" %}
     fun sk_free = OPENSSL_sk_free(st : Void*)
     fun sk_num = OPENSSL_sk_num(x0 : Void*) : Int
     fun sk_pop_free = OPENSSL_sk_pop_free(st : Void*, callback : (Void*) ->)
@@ -271,6 +341,7 @@ lib LibCrypto
     fun sk_value(x0 : Void*, x1 : Int) : Void*
   {% end %}
 
+  fun d2i_X509(a : X509*, ppin : UInt8**, length : Long) : X509
   fun x509_dup = X509_dup(a : X509) : X509
   fun x509_free = X509_free(a : X509)
   fun x509_get_subject_name = X509_get_subject_name(a : X509) : X509_NAME
@@ -282,6 +353,7 @@ lib LibCrypto
   fun x509_get_ext = X509_get_ext(x : X509, idx : Int) : X509_EXTENSION
   fun x509_get_ext_count = X509_get_ext_count(x : X509) : Int
   fun x509_get_ext_d2i = X509_get_ext_d2i(x : X509, nid : Int, crit : Int*, idx : Int*) : Void*
+  fun x509_get_signature_nid = X509_get_signature_nid(x509 : X509) : Int32
 
   MBSTRING_UTF8 = 0x1000
 
@@ -304,42 +376,37 @@ lib LibCrypto
   fun x509v3_ext_nconf_nid = X509V3_EXT_nconf_nid(conf : Void*, ctx : Void*, ext_nid : Int, value : Char*) : X509_EXTENSION
   fun x509v3_ext_print = X509V3_EXT_print(out : Bio*, ext : X509_EXTENSION, flag : Int, indent : Int) : Int
 
-  {% unless compare_versions(OPENSSL_VERSION, "1.1.0") >= 0 %}
-    fun err_load_crypto_strings = ERR_load_crypto_strings
-    fun openssl_add_all_algorithms = OPENSSL_add_all_algorithms_noconf
-  {% end %}
+  fun x509_store_add_cert = X509_STORE_add_cert(ctx : X509_STORE, x : X509) : Int
 
-  {% if compare_versions(OPENSSL_VERSION, "1.0.2") >= 0 %}
-    type X509VerifyParam = Void*
+  type X509VerifyParam = Void*
 
-    @[Flags]
-    enum X509VerifyFlags : ULong
-      CB_ISSUER_CHECK      =      0x1
-      USE_CHECK_TIME       =      0x2
-      CRL_CHECK            =      0x4
-      CRL_CHECK_ALL        =      0x8
-      IGNORE_CRITICAL      =     0x10
-      X509_STRICT          =     0x20
-      ALLOW_PROXY_CERTS    =     0x40
-      POLICY_CHECK         =     0x80
-      EXPLICIT_POLICY      =    0x100
-      INHIBIT_ANY          =    0x200
-      INHIBIT_MAP          =    0x400
-      NOTIFY_POLICY        =    0x800
-      EXTENDED_CRL_SUPPORT =   0x1000
-      USE_DELTAS           =   0x2000
-      CHECK_SS_SIGNATURE   =   0x4000
-      TRUSTED_FIRST        =   0x8000
-      SUITEB_128_LOS_ONLY  =  0x10000
-      SUITEB_192_LOS       =  0x20000
-      SUITEB_128_LOS       =  0x30000
-      PARTIAL_CHAIN        =  0x80000
-      NO_ALT_CHAINS        = 0x100000
-    end
+  @[Flags]
+  enum X509VerifyFlags : ULong
+    CB_ISSUER_CHECK      =      0x1
+    USE_CHECK_TIME       =      0x2
+    CRL_CHECK            =      0x4
+    CRL_CHECK_ALL        =      0x8
+    IGNORE_CRITICAL      =     0x10
+    X509_STRICT          =     0x20
+    ALLOW_PROXY_CERTS    =     0x40
+    POLICY_CHECK         =     0x80
+    EXPLICIT_POLICY      =    0x100
+    INHIBIT_ANY          =    0x200
+    INHIBIT_MAP          =    0x400
+    NOTIFY_POLICY        =    0x800
+    EXTENDED_CRL_SUPPORT =   0x1000
+    USE_DELTAS           =   0x2000
+    CHECK_SS_SIGNATURE   =   0x4000
+    TRUSTED_FIRST        =   0x8000
+    SUITEB_128_LOS_ONLY  =  0x10000
+    SUITEB_192_LOS       =  0x20000
+    SUITEB_128_LOS       =  0x30000
+    PARTIAL_CHAIN        =  0x80000
+    NO_ALT_CHAINS        = 0x100000
+  end
 
-    fun x509_verify_param_lookup = X509_VERIFY_PARAM_lookup(name : UInt8*) : X509VerifyParam
-    fun x509_verify_param_set1_host = X509_VERIFY_PARAM_set1_host(param : X509VerifyParam, name : UInt8*, len : SizeT) : Int
-    fun x509_verify_param_set1_ip_asc = X509_VERIFY_PARAM_set1_ip_asc(param : X509VerifyParam, ip : UInt8*) : Int
-    fun x509_verify_param_set_flags = X509_VERIFY_PARAM_set_flags(param : X509VerifyParam, flags : X509VerifyFlags) : Int
-  {% end %}
+  fun x509_verify_param_lookup = X509_VERIFY_PARAM_lookup(name : UInt8*) : X509VerifyParam
+  fun x509_verify_param_set1_host = X509_VERIFY_PARAM_set1_host(param : X509VerifyParam, name : UInt8*, len : SizeT) : Int
+  fun x509_verify_param_set1_ip_asc = X509_VERIFY_PARAM_set1_ip_asc(param : X509VerifyParam, ip : UInt8*) : Int
+  fun x509_verify_param_set_flags = X509_VERIFY_PARAM_set_flags(param : X509VerifyParam, flags : X509VerifyFlags) : Int
 end

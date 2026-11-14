@@ -17,10 +17,48 @@ class JSON::Token
 
   property kind : Kind
   property string_value : String
-  property int_value : Int64
-  property float_value : Float64
-  property line_number : Int32
-  property column_number : Int32
+
+  def int_value : Int64
+    raw_value.to_i64
+  rescue exc : ArgumentError
+    raise ParseException.new(exc.message, line_number, column_number)
+  end
+
+  def float_value : Float64
+    raw_value.to_f64
+  rescue exc : ArgumentError
+    raise ParseException.new(exc.message, line_number, column_number)
+  end
+
+  @line_number : Int64
+  @column_number : Int64
+
+  def line_number : Int32
+    @line_number.to_i32
+  end
+
+  @[Experimental]
+  def line_number_i64 : Int64
+    @line_number
+  end
+
+  def line_number=(line_number)
+    @line_number = line_number.to_i64
+  end
+
+  def column_number : Int32
+    @column_number.to_i32
+  end
+
+  @[Experimental]
+  def column_number_i64
+    @column_number
+  end
+
+  def column_number=(column_number)
+    @column_number = column_number.to_i64
+  end
+
   property raw_value : String
 
   def initialize
@@ -28,8 +66,6 @@ class JSON::Token
     @line_number = 0
     @column_number = 0
     @string_value = ""
-    @int_value = 0_i64
-    @float_value = 0.0
     @raw_value = ""
   end
 

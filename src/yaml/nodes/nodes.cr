@@ -26,7 +26,7 @@ module YAML::Nodes
 
     # Raises a `YAML::ParseException` with the given message
     # located at this node's `location`.
-    def raise(message)
+    def raise(message) : NoReturn
       ::raise YAML::ParseException.new(message, *location)
     end
 
@@ -51,7 +51,7 @@ module YAML::Nodes
       end
     end
 
-    def to_yaml(builder : YAML::Builder)
+    def to_yaml(builder : YAML::Builder) : Nil
       nodes.each &.to_yaml(builder)
     end
 
@@ -72,7 +72,7 @@ module YAML::Nodes
     def initialize(@value : String)
     end
 
-    def to_yaml(builder : YAML::Builder)
+    def to_yaml(builder : YAML::Builder) : Nil
       builder.scalar(value, anchor, tag, style)
     end
 
@@ -96,13 +96,13 @@ module YAML::Nodes
       @nodes << node
     end
 
-    def each
+    def each(&)
       @nodes.each do |node|
         yield node
       end
     end
 
-    def to_yaml(builder : YAML::Builder)
+    def to_yaml(builder : YAML::Builder) : Nil
       builder.sequence(anchor, tag, style) do
         each &.to_yaml(builder)
       end
@@ -132,13 +132,13 @@ module YAML::Nodes
     end
 
     # Yields each key-value pair in this mapping.
-    def each
+    def each(&)
       0.step(by: 2, to: @nodes.size - 1) do |i|
         yield({@nodes[i], @nodes[i + 1]})
       end
     end
 
-    def to_yaml(builder : YAML::Builder)
+    def to_yaml(builder : YAML::Builder) : Nil
       builder.mapping(anchor, tag, style) do
         each do |key, value|
           key.to_yaml(builder)
@@ -162,7 +162,7 @@ module YAML::Nodes
     def initialize(@anchor : String)
     end
 
-    def to_yaml(builder : YAML::Builder)
+    def to_yaml(builder : YAML::Builder) : Nil
       builder.alias(anchor.not_nil!)
     end
 

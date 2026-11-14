@@ -37,6 +37,11 @@ class Log
 
   {% for method in %i(trace debug info notice warn error fatal) %}
     # See `Log#{{method.id}}`.
+    def self.{{method.id}}(*, exception : Exception) : Nil
+      Top.{{method.id}}(exception: exception)
+    end
+
+    # See `Log#{{method.id}}`.
     def self.{{method.id}}(*, exception : Exception? = nil)
       Top.{{method.id}}(exception: exception) do |dsl|
         yield dsl
@@ -49,7 +54,7 @@ class Log
   at_exit { @@builder.close }
 
   # Returns the default `Log::Builder` used for `Log.for` calls.
-  def self.builder
+  def self.builder : Log::Builder
     @@builder
   end
 
@@ -59,12 +64,12 @@ class Log
   end
 
   # Sets the current fiber logging context.
-  def self.context=(value : Log::Metadata)
+  def self.context=(value : Log::Metadata) : Log::Metadata
     Fiber.current.logging_context = value
   end
 
   # :ditto:
-  def self.context=(value : Log::Context)
+  def self.context=(value : Log::Context) : Log::Metadata
     # NOTE: There is a need for `Metadata` and `Context` setters in
     # because `Log.context` returns a `Log::Context` for allowing DSL like `Log.context.set(a: 1)`
     # but if the metadata is built manually the construct `Log.context = metadata` will be used.
@@ -82,18 +87,20 @@ class Log
   end
 
   # Method to save and restore the current logging context.
+  # Temporary context for the duration of the block can be set via arguments.
   #
   # ```
   # Log.context.set a: 1
   # Log.info { %(message with {"a" => 1} context) }
-  # Log.with_context do
-  #   Log.context.set b: 2
-  #   Log.info { %(message with {"a" => 1, "b" => 2} context) }
+  # Log.with_context(b: 2) do
+  #   Log.context.set c: 3
+  #   Log.info { %(message with {"a" => 1, "b" => 2, "c" => 3} context) }
   # end
   # Log.info { %(message with {"a" => 1} context) }
   # ```
-  def self.with_context
+  def self.with_context(**kwargs, &)
     previous = Log.context
+    Log.context.set(**kwargs) unless kwargs.empty?
     begin
       yield
     ensure
@@ -102,8 +109,26 @@ class Log
   end
 
   # :ditto:
-  def with_context
-    self.class.with_context do
+  def self.with_context(values, &)
+    previous = Log.context
+    Log.context.set(values) unless values.empty?
+    begin
+      yield
+    ensure
+      Log.context = previous
+    end
+  end
+
+  # :ditto:
+  def with_context(**kwargs, &)
+    self.class.with_context(**kwargs) do
+      yield
+    end
+  end
+
+  # :ditto:
+  def with_context(values, &)
+    self.class.with_context(values) do
       yield
     end
   end
@@ -120,7 +145,7 @@ class Log
     # Log.context.clear
     # Log.info { "message with empty context" }
     # ```
-    def clear
+    def clear : Nil
       Fiber.current.logging_context = @metadata = Log::Metadata.empty
     end
 
@@ -137,12 +162,12 @@ class Log
     # Log.context.set extra: h
     # Log.info { %q(message with a: 1, b: 2, extra: {"c" => 3} context) }
     # ```
-    def set(**kwargs)
+    def set(**kwargs) : Log::Metadata
       extend_fiber_context(Fiber.current, kwargs)
     end
 
     # :ditto:
-    def set(values)
+    def set(values : Hash | NamedTuple) : Nil
       extend_fiber_context(Fiber.current, values)
     end
 

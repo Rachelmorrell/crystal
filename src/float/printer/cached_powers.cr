@@ -27,6 +27,7 @@
 #   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+@[Deprecated]
 module Float::Printer::CachedPowers
   record Power, significand : UInt64, binary_exp : Int16, decimal_exp : Int16
   # The minimal and maximal target exponent define the range of w's binary
@@ -140,7 +141,7 @@ module Float::Printer::CachedPowers
 
   Pow10Cache = {0, 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000}
 
-  def self.largest_pow10(n, n_bits)
+  def self.largest_pow10(n, n_bits) : {Int32, Int32}
     # 1233/4096 is approximately 1/lg(10).
     #  We increment to skip over the first entry in the powers cache.
     guess = ((n_bits + 1) * 1233 >> 12) + 1
@@ -155,7 +156,6 @@ module Float::Printer::CachedPowers
   # around *exp* (boundaries included).
   def self.get_cached_power_for_binary_exponent(exp) : {DiyFP, Int32}
     min_exp = MIN_TARGET_EXP - (exp + DiyFP::SIGNIFICAND_SIZE)
-    max_exp = MAX_TARGET_EXP - (exp + DiyFP::SIGNIFICAND_SIZE)
     k = ((min_exp + DiyFP::SIGNIFICAND_SIZE - 1) * D_1_LOG2_10).ceil
     index = ((CACHED_POWER_OFFSET + k.to_i - 1) // CACHED_EXP_STEP) + 1
     pow = PowCache[index]

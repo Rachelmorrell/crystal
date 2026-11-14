@@ -1,15 +1,29 @@
 require "uri/punycode"
+require "./address"
+require "crystal/system/addrinfo"
 
 class Socket
   # Domain name resolver.
+  #
+  # # Query Concurrency Behaviour
+  #
+  # On most platforms, DNS queries are currently resolved synchronously.
+  # Calling a resolve method blocks the entire thread until it returns.
+  # This can cause latencies, especially in single-threaded processes.
+  #
+  # DNS queries resolve asynchronously on the following platforms:
+  #
+  # * Windows 8 and higher
+  #
+  # NOTE: Follow the discussion in [Async DNS resolution (#13619)](https://github.com/crystal-lang/crystal/issues/13619)
+  # for more details.
   struct Addrinfo
+    include Crystal::System::Addrinfo
+
     getter family : Family
     getter type : Type
     getter protocol : Protocol
     getter size : Int32
-
-    @addr : LibC::SockaddrIn6
-    @next : LibC::Addrinfo*
 
     # Resolves a domain that best matches the given options.
     #
@@ -22,6 +36,9 @@ class Socket
     #   specified.
     # - *protocol* is the intended socket protocol (e.g. `Protocol::TCP`) and
     #   should be specified.
+    # - *timeout* is optional and specifies the maximum time to wait before
+    #   `IO::TimeoutError` is raised. Currently this is only supported on
+    #   Windows.
     #
     # Example:
     # ```
@@ -29,17 +46,20 @@ class Socket
     #
     # addrinfos = Socket::Addrinfo.resolve("example.org", "http", type: Socket::Type::STREAM, protocol: Socket::Protocol::TCP)
     # ```
-    def self.resolve(domain, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout = nil) : Array(Addrinfo)
+    def self.resolve(domain : String, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout : Time::Span? = nil) : Array(Addrinfo)
       addrinfos = [] of Addrinfo
 
       getaddrinfo(domain, service, family, type, protocol, timeout) do |addrinfo|
-        loop do
-          addrinfos << addrinfo.not_nil!
-          unless addrinfo = addrinfo.next?
-            return addrinfos
-          end
-        end
+        addrinfos << addrinfo
       end
+
+      addrinfos
+    end
+
+    # :ditto:
+    @[Deprecated("Use `.resolve(String, _, Family?, Type, Protocol, Time::Span?)` instead.")]
+    def self.resolve(domain : String, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout : Number = 0) : Array(Addrinfo)
+      resolve(domain, service, family, type, protocol, timeout.seconds)
     end
 
     # Resolves a domain that best matches the given options.
@@ -55,85 +75,99 @@ class Socket
     #
     # The iteration will be stopped once the block returns something that isn't
     # an `Exception` (e.g. a `Socket` or `nil`).
-    def self.resolve(domain, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout = nil)
+    def self.resolve(domain : String, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout : Time::Span? = nil, &)
+      exception = nil
+
       getaddrinfo(domain, service, family, type, protocol, timeout) do |addrinfo|
-        error = nil
+        value = yield addrinfo
 
-        loop do
-          value = yield addrinfo.not_nil!
+        if value.is_a?(Exception)
+          exception = value
+        else
+          return value
+        end
+      end
 
-          if value.is_a?(Exception)
-            error = value
-          else
-            return value
-          end
+      case exception
+      when Socket::ConnectError
+        raise Socket::ConnectError.from_os_error("Error connecting to '#{domain}:#{service}'", exception.os_error)
+      when Exception
+        {% if flag?(:win32) && compare_versions(Crystal::LLVM_VERSION, "13.0.0") < 0 %}
+          # FIXME: Workaround for https://github.com/crystal-lang/crystal/issues/11047
+          array = StaticArray(UInt8, 0).new(0)
+        {% end %}
 
-          unless addrinfo = addrinfo.try(&.next?)
-            if error.is_a?(Socket::ConnectError)
-              raise Socket::ConnectError.from_errno("Error connecting to '#{domain}:#{service}'")
-            else
-              raise error if error
+        raise exception
+      end
+    end
+
+    # :ditto:
+    @[Deprecated("Use `.resolve(String, _, Family?, Type, Protocol, Time::Span?, &)` instead.")]
+    def self.resolve(domain : String, service, family : Family? = nil, type : Type = nil, protocol : Protocol = Protocol::IP, timeout : Number = 0, &)
+      resolve(domain, service, family, type, protocol, timeout.seconds) { |addrinfo| yield addrinfo }
+    end
+
+    class Error < Socket::Error
+      @[Deprecated("Use `#os_error` instead")]
+      def error_code : Int32
+        os_error.not_nil!.value.to_i32!
+      end
+
+      @[Deprecated("Use `.from_os_error` instead")]
+      def self.new(error_code : Int32, message, domain)
+        from_os_error(message, Errno.new(error_code), domain: domain, type: nil, service: nil, protocol: nil)
+      end
+
+      @[Deprecated("Use `.from_os_error` instead")]
+      def self.new(error_code : Int32, domain)
+        new error_code, nil, domain: domain
+      end
+
+      protected def self.new_from_os_error(message : String?, os_error, *, domain, type, service, protocol, **opts)
+        new(message, **opts)
+      end
+
+      protected def self.new_from_os_error(message : String?, os_error, *, domain, **opts)
+        new(message, **opts)
+      end
+
+      def self.build_message(message, *, domain, **opts)
+        "Hostname lookup for #{domain} failed"
+      end
+
+      def self.os_error_message(os_error : Errno | WinError, *, type, service, protocol, **opts)
+        # when `EAI_NONAME` etc. is an integer then only `os_error.value` can
+        # match; when `EAI_NONAME` is a `WinError` then `os_error` itself can
+        # match
+        case os_error.is_a?(Errno) ? os_error.value : os_error
+        when LibC::EAI_NONAME
+          "No address found"
+        when LibC::EAI_SOCKTYPE
+          "The requested socket type #{type} protocol #{protocol} is not supported"
+        when LibC::EAI_SERVICE
+          "The requested service #{service} is not available for the requested socket type #{type}"
+        else
+          # Win32 also has this method, but `WinError` is already sufficient
+          {% if LibC.has_method?(:gai_strerror) %}
+            if os_error.is_a?(Errno)
+              return String.new(LibC.gai_strerror(os_error))
             end
-          end
+          {% end %}
+
+          super
         end
       end
     end
 
-    class Error < Socket::Error
-      getter error_code : Int32
-
-      def self.new(error_code, domain)
-        new error_code, String.new(LibC.gai_strerror(error_code)), domain
-      end
-
-      def initialize(@error_code, message, domain)
-        super("Hostname lookup for #{domain} failed: #{message}")
-      end
-    end
-
-    private def self.getaddrinfo(domain, service, family, type, protocol, timeout)
+    private def self.getaddrinfo(domain, service, family, type, protocol, timeout, &)
       # RFC 3986 says:
       # > When a non-ASCII registered name represents an internationalized domain name
       # > intended for resolution via the DNS, the name must be transformed to the IDNA
       # > encoding [RFC3490] prior to name lookup.
       domain = URI::Punycode.to_ascii domain
 
-      hints = LibC::Addrinfo.new
-      hints.ai_family = (family || Family::UNSPEC).to_i32
-      hints.ai_socktype = type
-      hints.ai_protocol = protocol
-      hints.ai_flags = 0
-
-      if service.is_a?(Int)
-        hints.ai_flags |= LibC::AI_NUMERICSERV
-      end
-
-      # On OS X < 10.12, the libsystem implementation of getaddrinfo segfaults
-      # if AI_NUMERICSERV is set, and servname is NULL or 0.
-      {% if flag?(:darwin) %}
-        if (service == 0 || service == nil) && (hints.ai_flags & LibC::AI_NUMERICSERV)
-          hints.ai_flags |= LibC::AI_NUMERICSERV
-          service = "00"
-        end
-      {% end %}
-
-      case ret = LibC.getaddrinfo(domain, service.to_s, pointerof(hints), out ptr)
-      when 0
-        # success
-      when LibC::EAI_NONAME
-        raise Error.new(ret, "No address found", domain)
-      when LibC::EAI_SOCKTYPE
-        raise Error.new(ret, "The requested socket type #{type} protocol #{protocol} is not supported", domain)
-      when LibC::EAI_SERVICE
-        raise Error.new(ret, "The requested service #{service} is not available for the requested socket type #{type}", domain)
-      else
-        raise Error.new(ret, domain)
-      end
-
-      begin
-        yield new(ptr)
-      ensure
-        LibC.freeaddrinfo(ptr)
+      Crystal::System::Addrinfo.getaddrinfo(domain, service, family, type, protocol, timeout) do |addrinfo|
+        yield addrinfo
       end
     end
 
@@ -146,14 +180,26 @@ class Socket
     #
     # addrinfos = Socket::Addrinfo.tcp("example.org", 80)
     # ```
-    def self.tcp(domain, service, family = Family::UNSPEC, timeout = nil) : Array(Addrinfo)
-      resolve(domain, service, family, Type::STREAM, Protocol::TCP)
+    def self.tcp(domain : String, service, family = Family::UNSPEC, timeout : Time::Span? = nil) : Array(Addrinfo)
+      resolve(domain, service, family, Type::STREAM, Protocol::TCP, timeout)
+    end
+
+    # :ditto:
+    @[Deprecated("Use `.tcp(String, _, _, Time::Span?)` instead.")]
+    def self.tcp(domain : String, service, family = Family::UNSPEC, timeout : Number = 0) : Array(Addrinfo)
+      tcp(domain, service, family, timeout.seconds)
     end
 
     # Resolves a domain for the TCP protocol with STREAM type, and yields each
     # possible `Addrinfo`. See `#resolve` for details.
-    def self.tcp(domain, service, family = Family::UNSPEC, timeout = nil)
-      resolve(domain, service, family, Type::STREAM, Protocol::TCP) { |addrinfo| yield addrinfo }
+    def self.tcp(domain : String, service, family = Family::UNSPEC, timeout : Time::Span? = nil, &)
+      resolve(domain, service, family, Type::STREAM, Protocol::TCP, timeout) { |addrinfo| yield addrinfo }
+    end
+
+    # :ditto:
+    @[Deprecated("Use `.tcp(String, _, _, Time::Span?, &)` instead.")]
+    def self.tcp(domain : String, service, family = Family::UNSPEC, timeout : Number = 0, &)
+      tcp(domain, service, family, timeout.seconds) { |addrinfo| yield addrinfo }
     end
 
     # Resolves *domain* for the UDP protocol and returns an `Array` of possible
@@ -165,50 +211,40 @@ class Socket
     #
     # addrinfos = Socket::Addrinfo.udp("example.org", 53)
     # ```
-    def self.udp(domain, service, family = Family::UNSPEC, timeout = nil) : Array(Addrinfo)
-      resolve(domain, service, family, Type::DGRAM, Protocol::UDP)
+    def self.udp(domain : String, service, family = Family::UNSPEC, timeout : Time::Span? = nil) : Array(Addrinfo)
+      resolve(domain, service, family, Type::DGRAM, Protocol::UDP, timeout)
+    end
+
+    # :ditto:
+    @[Deprecated("Use `.udp(String, _, _, Time::Span?)` instead.")]
+    def self.udp(domain : String, service, family = Family::UNSPEC, timeout : Number = 0) : Array(Addrinfo)
+      udp(domain, service, family, timeout.seconds)
     end
 
     # Resolves a domain for the UDP protocol with DGRAM type, and yields each
     # possible `Addrinfo`. See `#resolve` for details.
-    def self.udp(domain, service, family = Family::UNSPEC, timeout = nil)
-      resolve(domain, service, family, Type::DGRAM, Protocol::UDP) { |addrinfo| yield addrinfo }
+    def self.udp(domain : String, service, family = Family::UNSPEC, timeout : Time::Span? = nil, &)
+      resolve(domain, service, family, Type::DGRAM, Protocol::UDP, timeout) { |addrinfo| yield addrinfo }
     end
 
-    protected def initialize(addrinfo : LibC::Addrinfo*)
-      @family = Family.from_value(addrinfo.value.ai_family)
-      @type = Type.from_value(addrinfo.value.ai_socktype)
-      @protocol = Protocol.from_value(addrinfo.value.ai_protocol)
-      @size = addrinfo.value.ai_addrlen.to_i
-
-      @addr = uninitialized LibC::SockaddrIn6
-      @next = addrinfo.value.ai_next
-
-      case @family
-      when Family::INET6
-        addrinfo.value.ai_addr.as(LibC::SockaddrIn6*).copy_to(pointerof(@addr).as(LibC::SockaddrIn6*), 1)
-      when Family::INET
-        addrinfo.value.ai_addr.as(LibC::SockaddrIn*).copy_to(pointerof(@addr).as(LibC::SockaddrIn*), 1)
-      else
-        # TODO: (asterite) UNSPEC and UNIX unsupported?
-      end
+    # :ditto:
+    @[Deprecated("Use `.udp(String, _, _, Time::Span?, &)` instead.")]
+    def self.udp(domain : String, service, family = Family::UNSPEC, timeout : Number = 0, &)
+      udp(domain, service, family, timeout.seconds) { |addrinfo| yield addrinfo }
     end
-
-    @ip_address : IPAddress?
 
     # Returns an `IPAddress` matching this addrinfo.
-    def ip_address
-      @ip_address ||= IPAddress.from(to_unsafe, size)
+    getter(ip_address : Socket::IPAddress) do
+      system_ip_address
     end
 
-    def to_unsafe
-      pointerof(@addr).as(LibC::Sockaddr*)
-    end
-
-    protected def next?
-      if addrinfo = @next
-        Addrinfo.new(addrinfo)
-      end
+    def inspect(io : IO)
+      io << "Socket::Addrinfo("
+      io << ip_address << ", "
+      io << family << ", "
+      io << type << ", "
+      io << protocol
+      io << ")"
     end
   end
 end

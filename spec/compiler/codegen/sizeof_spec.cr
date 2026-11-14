@@ -6,7 +6,7 @@ describe "Code gen: sizeof" do
   end
 
   it "gets sizeof struct" do
-    run("
+    run(<<-CRYSTAL).to_i.should eq(12)
       struct Foo
         def initialize(@x : Int32, @y : Int32, @z : Int32)
         end
@@ -15,12 +15,12 @@ describe "Code gen: sizeof" do
       Foo.new(1, 2, 3)
 
       sizeof(Foo)
-      ").to_i.should eq(12)
+      CRYSTAL
   end
 
   it "gets sizeof class" do
     # A class is represented as a pointer to its data
-    run("
+    run(<<-CRYSTAL).to_i.should eq(sizeof(Void*))
       class Foo
         def initialize(@x : Int32, @y : Int32, @z : Int32)
         end
@@ -29,13 +29,13 @@ describe "Code gen: sizeof" do
       Foo.new(1, 2, 3)
 
       sizeof(Foo)
-      ").to_i.should eq(sizeof(Void*))
+      CRYSTAL
   end
 
   it "gets sizeof union" do
-    size = run("
+    size = run(<<-CRYSTAL).to_i
       sizeof(Int32 | Float64)
-      ").to_i
+      CRYSTAL
 
     # This union is represented as:
     #
@@ -56,7 +56,7 @@ describe "Code gen: sizeof" do
   end
 
   it "gets instance_sizeof class" do
-    run("
+    run(<<-CRYSTAL).to_i.should eq(16)
       class Foo
         def initialize(@x : Int32, @y : Int32, @z : Int32)
         end
@@ -65,18 +65,18 @@ describe "Code gen: sizeof" do
       Foo.new(1, 2, 3)
 
       instance_sizeof(Foo)
-      ").to_i.should eq(16)
+      CRYSTAL
   end
 
   it "gets instance_sizeof a generic type with type vars" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(8)
       class Foo(T)
         def initialize(@x : T)
         end
       end
 
       instance_sizeof(Foo(Int32))
-      )).to_i.should eq(8)
+      CRYSTAL
   end
 
   it "gets sizeof Void" do
@@ -90,6 +90,17 @@ describe "Code gen: sizeof" do
     run("sizeof(NoReturn)").to_i.should eq(0)
   end
 
+  it "gets sizeof Void expression" do
+    # Same as the size of a byte, because doing
+    # `Pointer(Void).malloc` must work like `Pointer(UInt8).malloc`
+    run("sizeof(typeof((x = uninitialized Void)))").to_i.should eq(1)
+  end
+
+  it "gets sizeof NoReturn expression" do
+    # NoReturn can't hold anything
+    run("sizeof(typeof((x = uninitialized NoReturn)))").to_i.should eq(0)
+  end
+
   it "gets sizeof Nil (#7644)" do
     # Nil can't hold anything
     run("sizeof(Nil)").to_i.should eq(0)
@@ -100,7 +111,7 @@ describe "Code gen: sizeof" do
   end
 
   it "can use sizeof in type argument (1)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(4)
       struct StaticArray
         def size
           N
@@ -109,11 +120,11 @@ describe "Code gen: sizeof" do
 
       x = uninitialized UInt8[sizeof(Int32)]
       x.size
-      )).to_i.should eq(4)
+      CRYSTAL
   end
 
   it "can use sizeof in type argument (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(8)
       struct StaticArray
         def size
           N
@@ -122,11 +133,11 @@ describe "Code gen: sizeof" do
 
       x = uninitialized UInt8[sizeof(Float64)]
       x.size
-      )).to_i.should eq(8)
+      CRYSTAL
   end
 
   it "can use sizeof of virtual type" do
-    size = run(%(
+    size = run(<<-CRYSTAL).to_i
       class Foo
         @x = 1
       end
@@ -137,7 +148,7 @@ describe "Code gen: sizeof" do
 
       foo = Bar.new.as(Foo)
       sizeof(typeof(foo))
-      )).to_i
+      CRYSTAL
 
     {% if flag?(:bits64) %}
       size.should eq(8)
@@ -147,7 +158,7 @@ describe "Code gen: sizeof" do
   end
 
   it "can use instance_sizeof of virtual type" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(12)
       class Foo
         @x = 1
       end
@@ -162,11 +173,11 @@ describe "Code gen: sizeof" do
 
       bar = Baz.new.as(Bar)
       instance_sizeof(typeof(bar))
-      )).to_i.should eq(12)
+      CRYSTAL
   end
 
   it "can use instance_sizeof in type argument" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(12)
       struct StaticArray
         def size
           N
@@ -182,12 +193,11 @@ describe "Code gen: sizeof" do
 
       x = uninitialized UInt8[instance_sizeof(Foo)]
       x.size
-      )).to_i.should eq(12)
+      CRYSTAL
   end
 
-  {% if flag?(:x86_64) %}
-    it "returns correct sizeof for abstract struct (#4319)" do
-      size = run(%(
+  it "returns correct sizeof for abstract struct (#4319)" do
+    size = run(<<-CRYSTAL).to_i
         abstract struct Entry
         end
 
@@ -204,14 +214,13 @@ describe "Code gen: sizeof" do
         end
 
         sizeof(Entry)
-        )).to_i
+        CRYSTAL
 
-      size.should eq(16)
-    end
-  {% end %}
+    size.should eq(16)
+  end
 
   it "doesn't precompute sizeof of abstract struct (#7741)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(16)
       abstract struct Base
       end
 
@@ -224,11 +233,12 @@ describe "Code gen: sizeof" do
 
       Foo({Int32, Int32, Int32, Int32})
 
-      z)).to_i.should eq(16)
+      z
+      CRYSTAL
   end
 
   it "doesn't precompute sizeof of module (#7741)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(16)
       module Base
       end
 
@@ -243,6 +253,134 @@ describe "Code gen: sizeof" do
 
       Foo({Int32, Int32, Int32, Int32})
 
-      z)).to_i.should eq(16)
+      z
+      CRYSTAL
+  end
+
+  describe "alignof" do
+    it "gets alignof primitive types" do
+      run("alignof(Int32)").to_i.should eq(4)
+      run("alignof(Void)").to_i.should eq(1)
+      run("alignof(NoReturn)").to_i.should eq(1)
+      run("alignof(Nil)").to_i.should eq(1)
+      run("alignof(Bool)").to_i.should eq(1)
+    end
+
+    it "gets alignof struct" do
+      run(<<-CRYSTAL).to_i.should eq(4)
+        struct Foo
+          def initialize(@x : Int8, @y : Int32, @z : Int16)
+          end
+        end
+
+        Foo.new(1, 2, 3)
+
+        alignof(Foo)
+        CRYSTAL
+    end
+
+    it "gets alignof class" do
+      # pointer size and alignment should be identical
+      run(<<-CRYSTAL).to_i.should eq(sizeof(Void*))
+        class Foo
+          def initialize(@x : Int8, @y : Int32, @z : Int16)
+          end
+        end
+
+        Foo.new(1, 2, 3)
+
+        alignof(Foo)
+        CRYSTAL
+    end
+
+    it "gets alignof union" do
+      run("alignof(Int32 | Int8)").to_i.should eq(8)
+      run("alignof(Int32 | Int64)").to_i.should eq(8)
+    end
+
+    it "alignof mixed union is not less than alignof its variant types" do
+      # NOTE: `alignof(Int128) == 16` is not guaranteed
+      run("alignof(Int32 | Int128) >= alignof(Int128)").to_b.should be_true
+    end
+
+    it "gets alignof Void" do
+      run("alignof(Void)").to_i.should eq(1)
+    end
+
+    it "gets alignof NoReturn" do
+      run("alignof(NoReturn)").to_i.should eq(1)
+    end
+
+    it "gets alignof Void expression" do
+      run("alignof(typeof((x = uninitialized Void)))").to_i.should eq(1)
+    end
+
+    it "gets alignof NoReturn expression" do
+      run("alignof(typeof((x = uninitialized NoReturn)))").to_i.should eq(1)
+    end
+  end
+
+  describe "instance_alignof" do
+    it "gets instance_alignof class" do
+      run(<<-CRYSTAL).to_i.should eq(4)
+        class Foo
+          def initialize(@x : Int8, @y : Int32, @z : Int16)
+          end
+        end
+
+        Foo.new(1, 2, 3)
+
+        instance_alignof(Foo)
+        CRYSTAL
+
+      run(<<-CRYSTAL).to_i.should eq(8)
+        class Foo
+          def initialize(@x : Int8, @y : Int64, @z : Int16)
+          end
+        end
+
+        Foo.new(1, 2, 3)
+
+        instance_alignof(Foo)
+        CRYSTAL
+
+      run(<<-CRYSTAL).to_i.should eq(4)
+        class Foo
+        end
+
+        Foo.new
+
+        instance_alignof(Foo)
+        CRYSTAL
+    end
+
+    it "gets instance_alignof a generic type with type vars" do
+      run(<<-CRYSTAL).to_i.should eq(4)
+        class Foo(T)
+          def initialize(@x : T)
+          end
+        end
+
+        instance_alignof(Foo(Int32))
+        CRYSTAL
+
+      run(<<-CRYSTAL).to_i.should eq(8)
+        class Foo(T)
+          def initialize(@x : T)
+          end
+        end
+
+        instance_alignof(Foo(Int64))
+        CRYSTAL
+
+      run(<<-CRYSTAL).to_i.should eq(4)
+        class Foo(T)
+          def initialize(@x : T)
+          end
+        end
+
+        instance_alignof(Foo(Int8))
+        CRYSTAL
+    end
   end
 end

@@ -1,5 +1,5 @@
 struct LLVM::Target
-  def self.each
+  def self.each(&)
     target = LibLLVM.get_first_target
     while target
       yield Target.new target
@@ -8,7 +8,7 @@ struct LLVM::Target
   end
 
   def self.first : self
-    first? || raise "No LLVM targets available (did you forget to invoke LLVM.init_x86?)"
+    first? || raise "No LLVM targets available (did you forget to invoke LLVM.init_native_target?)"
   end
 
   def self.first? : self?
@@ -36,7 +36,7 @@ struct LLVM::Target
   def create_target_machine(triple, cpu = "", features = "",
                             opt_level = LLVM::CodeGenOptLevel::Default,
                             reloc = LLVM::RelocMode::PIC,
-                            code_model = LLVM::CodeModel::Default)
+                            code_model = LLVM::CodeModel::Default) : LLVM::TargetMachine
     target_machine = LibLLVM.create_target_machine(self, triple, cpu, features, opt_level, reloc, code_model)
     target_machine ? TargetMachine.new(target_machine) : raise "Couldn't create target machine"
   end

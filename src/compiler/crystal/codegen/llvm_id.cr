@@ -40,6 +40,10 @@ module Crystal
       type_id(type.typedef)
     end
 
+    def type_id(type : VirtualType | VirtualMetaclassType)
+      raise "BUG: called type_id for #{type} (#{type.class})"
+    end
+
     def type_id(type)
       min_max = @ids[type]?
       if min_max
@@ -79,7 +83,7 @@ module Crystal
       assign_id_from_subtypes type, subtypes
     end
 
-    private def assign_id_impl(type : PrimitiveType)
+    private def assign_id_impl(type : PrimitiveType | EnumType)
       id = next_id
       put_id type, id, id
       id
@@ -126,7 +130,7 @@ module Crystal
       end
     end
 
-    private def assign_id_to_metaclass(type : GenericClassInstanceType | PrimitiveType)
+    private def assign_id_to_metaclass(type : GenericClassInstanceType | PrimitiveType | EnumType)
       assign_id_to_metaclass(type, type.metaclass)
       type.subclasses.each do |subclass|
         assign_id_to_metaclass(subclass)
@@ -136,7 +140,7 @@ module Crystal
     private def assign_id_to_metaclass(type : GenericClassType)
       assign_id_to_metaclass(type, type.metaclass)
       type.each_instantiated_type do |instance|
-        assign_id_to_metaclass(instance)
+        assign_id_to_metaclass(instance) unless instance.unbound?
       end
       type.subclasses.each do |subclass|
         assign_id_to_metaclass(subclass)
@@ -164,7 +168,7 @@ module Crystal
     end
 
     private def subclasses_of(type)
-      type.subclasses.reject(&.is_a?(GenericInstanceType))
+      type.subclasses.reject(GenericInstanceType)
     end
   end
 end

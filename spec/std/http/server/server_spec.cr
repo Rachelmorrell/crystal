@@ -1,21 +1,18 @@
 require "../spec_helper"
 require "http/server"
-require "http/client/response"
+require "http/client"
 require "../../../support/ssl"
 require "../../../support/channel"
 
-# TODO: replace with `HTTP::Client` once it supports connecting to Unix socket (#2735)
+# TODO: replace with `HTTP::Client.get` once it supports connecting to Unix socket (#2735)
 private def unix_request(path)
   UNIXSocket.open(path) do |io|
-    request = HTTP::Request.new("GET", "/", HTTP::Headers{"X-Unix-Socket" => path})
-    request.to_io(io)
-
-    HTTP::Client::Response.from_io(io).body
+    HTTP::Client.new(io).get(path).body
   end
 end
 
 private def unused_port
-  TCPServer.open(0) do |server|
+  TCPServer.open(Socket::IPAddress::UNSPECIFIED, 0) do |server|
     server.local_address.port
   end
 end
@@ -48,18 +45,15 @@ describe HTTP::Server do
     server = HTTP::Server.new { }
     server.bind_unused_port
 
-    spawn do
+    run_server(server) do
       server.close
-      sleep 0.001
     end
-
-    server.listen
   end
 
   it "closes the server" do
     server = HTTP::Server.new { }
     address = server.bind_unused_port
-    ch = Channel(Symbol).new
+    ch = Channel(SpecChannelStatus).new
 
     spawn do
       server.listen
@@ -71,17 +65,17 @@ describe HTTP::Server do
     while !server.listening?
       Fiber.yield
     end
-    sleep 0.1
+    sleep 0.1.seconds
 
     schedule_timeout ch
 
     TCPSocket.open(address.address, address.port) { }
 
     # wait before closing the server
-    sleep 0.1
+    sleep 0.1.seconds
     server.close
 
-    ch.receive.should eq(:end)
+    ch.receive.should eq SpecChannelStatus::End
   end
 
   it "reuses the TCP port (SO_REUSEPORT)" do
@@ -97,7 +91,7 @@ describe HTTP::Server do
 
   it "binds to different ports" do
     server = HTTP::Server.new do |context|
-      context.response.print "Test Server (#{context.request.headers["Host"]?})"
+      context.response.print "Test Server (#{context.request.local_address})"
     end
 
     tcp_server = TCPServer.new("127.0.0.1", 0)
@@ -117,19 +111,19 @@ describe HTTP::Server do
 
   it "handles Expect: 100-continue correctly when body is read" do
     server = HTTP::Server.new do |context|
-      context.response << context.request.body.not_nil!.gets_to_end
+      context.response << context.request.body.should_not(be_nil).gets_to_end
     end
 
     address = server.bind_unused_port
 
     run_server(server) do
       TCPSocket.open(address.address, address.port) do |socket|
-        socket << requestize(<<-REQUEST
+        socket << requestize(<<-HTTP
           POST / HTTP/1.1
           Expect: 100-continue
           Content-Length: 5
 
-          REQUEST
+          HTTP
         )
         socket << "\r\n"
         socket.flush
@@ -156,12 +150,12 @@ describe HTTP::Server do
 
     run_server(server) do
       TCPSocket.open(address.address, address.port) do |socket|
-        socket << requestize(<<-REQUEST
+        socket << requestize(<<-HTTP
           POST / HTTP/1.1
           Expect: 100-continue
           Content-Length: 5
 
-          REQUEST
+          HTTP
         )
         socket << "\r\n"
         socket.flush
@@ -274,7 +268,6 @@ describe HTTP::Server do
         server = HTTP::Server.new { }
 
         private_key = datapath("openssl", "openssl.key")
-        certificate = datapath("openssl", "openssl.crt")
 
         begin
           expect_raises(ArgumentError, "missing private key") { server.bind "tls://127.0.0.1:8081" }
@@ -302,7 +295,7 @@ describe HTTP::Server do
   describe "#bind_tls" do
     it "binds SSL server context" do
       server = HTTP::Server.new do |context|
-        context.response.puts "Test Server (#{context.request.headers["Host"]?})"
+        context.response.puts "Test Server (#{context.request.local_address})"
         context.response.close
       end
 
@@ -355,8 +348,7 @@ describe HTTP::Server do
 
         begin
           server = HTTP::Server.new do |context|
-            # TODO: Replace custom header with local_address (#5784)
-            context.response.print "Test Server (#{context.request.headers["X-Unix-Socket"]?})"
+            context.response.print "Test Server (#{context.request.local_address})"
             context.response.close
           end
 
@@ -372,8 +364,8 @@ describe HTTP::Server do
           File.exists?(path1).should be_false
           File.exists?(path2).should be_false
         ensure
-          File.delete(path1) if File.exists?(path1)
-          File.delete(path2) if File.exists?(path2)
+          File.delete?(path1)
+          File.delete?(path2)
         end
       end
     end
@@ -414,6 +406,11 @@ describe HTTP::Server do
   end
 
   it "can process simultaneous SSL handshakes" do
+    {% if flag?(:win32) && flag?(:gnu) && flag?(:x86_64) %}
+      # FIXME: why does the spec causes the process to die with status code 67?
+      pending! "process dies with exit code 67 on msys2-ucrt-x86_64 on CI"
+    {% end %}
+
     server = HTTP::Server.new do |context|
       context.response.print "ok"
     end
@@ -434,7 +431,7 @@ describe HTTP::Server do
       begin
         ch.receive
         client = HTTP::Client.new(address.address, address.port, client_context)
-        client.read_timeout = client.connect_timeout = 3
+        client.read_timeout = client.connect_timeout = 3.seconds
         client.get("/").body.should eq "ok"
       ensure
         ch.send nil
@@ -543,7 +540,7 @@ describe HTTP::Server do
       write = IO::Memory.new
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::OK
 
@@ -553,7 +550,7 @@ describe HTTP::Server do
       server.max_request_line_size = 20
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::URI_TOO_LONG
     end
@@ -575,7 +572,7 @@ describe HTTP::Server do
       write = IO::Memory.new
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::OK
 
@@ -585,7 +582,7 @@ describe HTTP::Server do
       server.max_request_line_size = 20
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::URI_TOO_LONG
     end
@@ -607,7 +604,7 @@ describe HTTP::Server do
       write = IO::Memory.new
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::OK
 
@@ -617,9 +614,36 @@ describe HTTP::Server do
       server.max_headers_size = 10
 
       io = IO::Stapled.new(read, write)
-      server.@processor.process(io, io)
+      server.@processor.process(io)
       write.rewind
       HTTP::Client::Response.from_io(write).status.should eq HTTP::Status::REQUEST_HEADER_FIELDS_TOO_LARGE
+    end
+  end
+
+  describe "request smuggling/splitting mitigations (RFC 9112, Section 6.1)" do
+    it "rejects when content-length and transfer-encoding are both defined then closes the connection" do
+      channel = Channel({String, String, String?}).new(4)
+      response = nil
+
+      server = HTTP::Server.new do |ctx|
+        channel.send({ctx.request.method, ctx.request.path, ctx.request.body.try(&.gets_to_end)})
+      end
+
+      with_tempfile("socket") do |path|
+        server.bind_unix(path)
+        spawn { server.listen }
+
+        UNIXSocket.open(path) do |socket|
+          socket << "GET /one HTTP/1.1\r\nhost: example.org\r\ncontent-length: 4\r\ntransfer-encoding: chunked\r\n\r\n2a\r\nGET /admin HTTP/1.1\r\nhost: example.org\r\n\r\n\r\n0\r\n\r\nGET /two HTTP/1.1\r\nhost: example.org\r\n\r\n"
+          socket.close_write
+          response = socket.gets_to_end
+        end
+
+        channel.close
+      end
+
+      channel.receive?.should be_nil
+      response.not_nil!.should start_with("HTTP/1.1 400 ")
     end
   end
 

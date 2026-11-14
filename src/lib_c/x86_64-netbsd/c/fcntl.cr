@@ -12,12 +12,19 @@ lib LibC
   O_CREAT    =   0x0200
   O_NOFOLLOW =   0x0100
   O_TRUNC    =   0x0400
+  O_EXCL     =   0x0800
   O_APPEND   =   0x0008
   O_NONBLOCK =   0x0004
   O_SYNC     =   0x0080
   O_RDONLY   =   0x0000
   O_RDWR     =   0x0002
   O_WRONLY   =   0x0001
+
+  AT_FDCWD            =  -100 # Use cwd for relative link target
+  AT_EACCESS          = 0x100 # Use euig/egid for access checks
+  AT_SYMLINK_NOFOLLOW = 0x200 # Do not follow symlinks
+  AT_SYMLINK_FOLLOW   = 0x400 # Follow symlinks
+  AT_REMOVEDIR        = 0x800 # Remove directory only
 
   struct Flock
     l_start : OffT

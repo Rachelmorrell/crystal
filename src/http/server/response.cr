@@ -1,6 +1,6 @@
-require "http/headers"
-require "http/status"
-require "http/cookie"
+require "../headers"
+require "../status"
+require "../cookie"
 
 class HTTP::Server
   # The response to configure and write to in an `HTTP::Server` handler.
@@ -27,11 +27,19 @@ class HTTP::Server
     property output : IO
 
     # :nodoc:
-    setter version : String
+    def version=(version : String) : String
+      check_headers
+      @version = version
+    end
 
     # The status code of this response, which must be set before writing the response
     # body. If not set, the default value is 200 (OK).
-    property status : HTTP::Status
+    getter status : HTTP::Status
+
+    def status=(status : HTTP::Status) : HTTP::Status
+      check_headers
+      @status = status
+    end
 
     # :nodoc:
     property upgrade_handler : (IO ->)?
@@ -48,33 +56,46 @@ class HTTP::Server
     end
 
     # :nodoc:
-    def reset
+    def reset : Nil
       # This method is called by RequestProcessor to avoid allocating a new instance for each iteration.
       @headers.clear
       @cookies = nil
       @status = :ok
+      @status_message = nil
       @wrote_headers = false
       @output = @original_output
       @original_output.reset
     end
 
     # Convenience method to set the `Content-Type` header.
-    def content_type=(content_type : String)
+    def content_type=(content_type : String) : String
+      check_headers
       headers["Content-Type"] = content_type
     end
 
+    # Convenience method to get `Content-Type` header.
+    def content_type : String?
+      headers["Content-Type"]?
+    end
+
     # Convenience method to set the `Content-Length` header.
-    def content_length=(content_length : Int)
+    def content_length=(content_length : Int) : String
+      check_headers
       headers["Content-Length"] = content_length.to_s
     end
 
+    # Convenience method to get the `Content-Length` header.
+    def content_length : Int64?
+      headers["Content-Length"]?.try(&.to_i64)
+    end
+
     # Convenience method to retrieve the HTTP status code.
-    def status_code
+    def status_code : Int32
       status.code
     end
 
     # Convenience method to set the HTTP status code.
-    def status_code=(status_code : Int32)
+    def status_code=(status_code : Int32) : Int32
       self.status = HTTP::Status.new(status_code)
       status_code
     end
@@ -86,42 +107,58 @@ class HTTP::Server
       @output.write(slice)
     end
 
+    # See `IO#write_byte`.
+    def write_byte(byte : UInt8) : Nil
+      @output.write_byte(byte)
+    end
+
     # Convenience method to set cookies, see `HTTP::Cookies`.
-    def cookies
+    def cookies : HTTP::Cookies
       @cookies ||= HTTP::Cookies.new
     end
 
     # :nodoc:
-    def read(slice : Bytes)
+    def read(slice : Bytes) : NoReturn
       raise "Can't read from HTTP::Server::Response"
     end
 
     # Upgrades this response, writing headers and yielding the connection `IO` (a socket) to the given block.
     # This is useful to implement protocol upgrades, such as websockets.
-    def upgrade(&block : IO ->)
+    def upgrade(&block : IO ->) : Nil
       write_headers
       @upgrade_handler = block
     end
 
     # Flushes the output. This method must be implemented if wrapping the response output.
-    def flush
+    def flush : Nil
       @output.flush
     end
 
     # Closes this response, writing headers and body if not done yet.
     # This method must be implemented if wrapping the response output.
-    def close
+    def close : Nil
       return if closed?
 
       @output.close
     end
 
     # Returns `true` if this response has been closed.
-    def closed?
+    def closed? : Bool
       @output.closed?
     end
 
-    @status_message : String?
+    # Sets the status message.
+    def status_message=(status_message : String?) : String
+      check_headers
+      @status_message = status_message
+    end
+
+    # Returns the status message.
+    #
+    # Defaults to description of `#status`.
+    def status_message : String?
+      @status_message || @status.description
+    end
 
     # Sends *status* and *message* as response.
     #
@@ -134,7 +171,7 @@ class HTTP::Server
     #
     # Raises `IO::Error` if the response is closed or headers were already
     # sent.
-    def respond_with_status(status : HTTP::Status, message : String? = nil)
+    def respond_with_status(status : HTTP::Status, message : String? = nil) : Nil
       check_headers
       reset
       @status = status
@@ -145,19 +182,47 @@ class HTTP::Server
     end
 
     # :ditto:
-    def respond_with_status(status : Int, message : String? = nil)
+    def respond_with_status(status : Int, message : String? = nil) : Nil
       respond_with_status(HTTP::Status.new(status), message)
     end
 
+    # Sends a redirect to *location*.
+    #
+    # The value of *location* gets encoded with `URI.encode`.
+    #
+    # The *status* determines the HTTP status code which can be
+    # `HTTP::Status::FOUND` (`302`) for a temporary redirect or
+    # `HTTP::Status::MOVED_PERMANENTLY` (`301`) for a permanent redirect.
+    #
+    # The response gets closed.
+    #
+    # Raises `IO::Error` if the response is closed or headers were already
+    # sent.
+    def redirect(location : String | URI, status : HTTP::Status = :found) : Nil
+      check_headers
+
+      self.status = status
+      headers["Location"] = if location.is_a? URI
+                              location.to_s
+                            else
+                              String.build do |io|
+                                URI.encode(location.to_s, io) do |byte|
+                                  URI.reserved?(byte) || URI.unreserved?(byte)
+                                end
+                              end
+                            end
+      close
+    end
+
     private def check_headers
-      check_open
+      raise IO::Error.new "Closed stream" if @original_output.closed?
       if wrote_headers?
         raise IO::Error.new("Headers already sent")
       end
     end
 
     protected def write_headers
-      @io << @version << ' ' << @status.code << ' ' << (@status_message || @status.description) << "\r\n"
+      @io << @version << ' ' << @status.code << ' ' << status_message << "\r\n"
       headers.each do |name, values|
         values.each do |value|
           @io << name << ": " << value << "\r\n"
@@ -189,7 +254,7 @@ class HTTP::Server
         @closed = false
       end
 
-      def reset
+      def reset : Nil
         @in_buffer_rem = Bytes.empty
         @out_count = 0
         @sync = false
@@ -198,14 +263,16 @@ class HTTP::Server
         @closed = false
       end
 
-      private def unbuffered_read(slice : Bytes)
+      private def unbuffered_read(slice : Bytes) : Int32
         raise "Can't read from HTTP::Server::Response"
       end
 
-      private def unbuffered_write(slice : Bytes)
+      private def unbuffered_write(slice : Bytes) : Nil
         return if slice.empty?
 
-        unless response.wrote_headers?
+        if response.headers["Transfer-Encoding"]? == "chunked"
+          @chunked = true
+        elsif !response.wrote_headers?
           if response.version != "HTTP/1.0" && !response.headers.has_key?("Content-Length")
             response.headers["Transfer-Encoding"] = "chunked"
             @chunked = true
@@ -231,7 +298,7 @@ class HTTP::Server
         @closed
       end
 
-      def close
+      def close : Nil
         return if closed?
 
         # Conditionally determine based on status if the `content-length` header should be added automatically.
@@ -239,7 +306,7 @@ class HTTP::Server
         status = response.status
         set_content_length = !(status.not_modified? || status.no_content? || status.informational?)
 
-        if !response.wrote_headers? && !response.headers.has_key?("Content-Length") && set_content_length
+        if !response.wrote_headers? && !response.headers.has_key?("Transfer-Encoding") && !response.headers.has_key?("Content-Length") && set_content_length
           response.content_length = @out_count
         end
 
@@ -263,15 +330,15 @@ class HTTP::Server
         end
       end
 
-      private def unbuffered_close
+      private def unbuffered_close : Nil
         @closed = true
       end
 
-      private def unbuffered_rewind
+      private def unbuffered_rewind : Nil
         raise "Can't rewind to HTTP::Server::Response"
       end
 
-      private def unbuffered_flush
+      private def unbuffered_flush : Nil
         @io.flush
       rescue ex : IO::Error
         unbuffered_close

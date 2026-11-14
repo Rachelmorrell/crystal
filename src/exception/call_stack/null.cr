@@ -1,4 +1,7 @@
 struct Exception::CallStack
+  def self.load_debug_info_impl : Nil
+  end
+
   def self.decode_address(ip)
     ip
   end
@@ -9,5 +12,16 @@ struct Exception::CallStack
 
   def self.decode_function_name(pc)
     nil
+  end
+
+  def self.print_backtrace : Nil
+  end
+
+  protected def self.decode_frame(pc)
+    nil
+  end
+
+  protected def self.unwind : Array(Void*)
+    [] of Void*
   end
 end

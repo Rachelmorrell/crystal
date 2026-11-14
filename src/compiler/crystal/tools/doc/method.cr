@@ -43,7 +43,7 @@ class Crystal::Doc::Method
   # This docs not include the "Description copied from ..." banner
   # in case it's needed.
   def doc
-    doc_info.doc
+    doc_info.doc.try &.strip.lchop(":showdoc:").strip
   end
 
   # Returns the type this method's docs are copied from, but
@@ -57,15 +57,17 @@ class Crystal::Doc::Method
   private def compute_doc_info : DocInfo?
     def_doc = @def.doc
     if def_doc
-      has_inherit = def_doc =~ /^\s*:inherit:\s*$/m
-      if has_inherit
-        ancestor_info = self.ancestor_doc_info
-        if ancestor_info
-          def_doc = def_doc.gsub(/^[ \t]*:inherit:[ \t]*$/m, ancestor_info.doc.not_nil!)
-          return DocInfo.new(def_doc, nil)
-        end
+      ancestor_doc_info = nil
+      # TODO: warn about `:inherit:` not finding an ancestor
+      inherit_def_doc = def_doc.gsub(/^[ \t]*:inherit:[ \t]*$/m) do
+        ancestor_doc_info ||= self.ancestor_doc_info
+        ancestor_doc_info.try(&.doc) || break
+      end
 
-        # TODO: warn about `:inherit:` not finding an ancestor
+      # inherit_def_doc is nil when breaking from the gsub block which means
+      # no ancestor doc info was found
+      if inherit_def_doc && !inherit_def_doc.same?(def_doc)
+        return DocInfo.new(inherit_def_doc, nil)
       end
 
       if @def.name.starts_with?(PSEUDO_METHOD_PREFIX)
@@ -77,7 +79,7 @@ class Crystal::Doc::Method
 
     previous_docs = previous_def_docs(@def)
     if previous_docs
-      return DocInfo.new(def_doc, nil)
+      return DocInfo.new(previous_docs, nil)
     end
 
     ancestor_info = self.ancestor_doc_info
@@ -104,14 +106,12 @@ class Crystal::Doc::Method
       other_defs_with_metadata = ancestor.defs.try &.[@def.name]?
       other_defs_with_metadata.try &.each do |other_def_with_metadata|
         # If we find an ancestor method with the same signature
-        if def_with_metadata.restriction_of?(other_def_with_metadata, type.type) &&
-           other_def_with_metadata.restriction_of?(def_with_metadata, ancestor)
+        if def_with_metadata.compare_strictness(other_def_with_metadata, self_owner: type.type, other_owner: ancestor) == 0
           other_def = other_def_with_metadata.def
-          doc = other_def.doc
-          return DocInfo.new(doc, @generator.type(ancestor)) if doc
-
-          doc = previous_def_docs(other_def)
-          return DocInfo.new(doc, nil) if doc
+          ancestor_type = @generator.type(ancestor)
+          ancestor_method = Doc::Method.new(@generator, ancestor_type, other_def, @class_method)
+          doc = ancestor_method.doc
+          return DocInfo.new(doc, ancestor_type) if doc
         end
       end
     end
@@ -123,14 +123,37 @@ class Crystal::Doc::Method
     @generator.relative_location(@def)
   end
 
+  def external_var?
+    !!@def.as?(External).try(&.external_var?)
+  end
+
   def prefix
     case
     when @type.program?
       ""
-    when @class_method
+    when external_var?
+      "$"
+    when @class_method, @type.lib?
       "."
     else
       "#"
+    end
+  end
+
+  def visibility
+    case @def.visibility
+    in .public?
+    in .protected?
+      "protected"
+    in .private?
+      "private"
+    end
+  end
+
+  def real_name
+    a_def = @def.as?(External)
+    if a_def && (real_name = (a_def.real_name)) && (real_name != a_def.name)
+      " = #{real_name}"
     end
   end
 
@@ -173,6 +196,10 @@ class Crystal::Doc::Method
 
   def kind
     case
+    when external_var?
+      "$"
+    when @type.lib?
+      "fun "
     when @type.program?
       "def "
     when @class_method
@@ -184,8 +211,12 @@ class Crystal::Doc::Method
 
   def id
     String.build do |io|
-      io << to_s.gsub(/<.+?>/, "").delete(' ')
-      if @class_method
+      io << to_s.delete(' ')
+      if external_var?
+        io << "-external-var"
+      elsif @type.lib?
+        io << "-function"
+      elsif @class_method
         io << "-class-method"
       else
         io << "-instance-method"
@@ -194,11 +225,11 @@ class Crystal::Doc::Method
   end
 
   def html_id
-    id
+    HTML.escape(id)
   end
 
   def anchor
-    "#" + URI.encode(id)
+    "#" + URI.encode_path(id)
   end
 
   def to_s(io : IO) : Nil
@@ -211,14 +242,14 @@ class Crystal::Doc::Method
   end
 
   def args_to_s(io : IO) : Nil
-    args_to_html(io, links: false)
+    args_to_html(io, html: :none)
   end
 
-  def args_to_html
-    String.build { |io| args_to_html io }
+  def args_to_html(html : HTMLOption = :all)
+    String.build { |io| args_to_html io, html }
   end
 
-  def args_to_html(io : IO, links : Bool = true) : Nil
+  def args_to_html(io : IO, html : HTMLOption = :all) : Nil
     return_type = self.return_type
 
     return unless has_args? || return_type
@@ -229,7 +260,7 @@ class Crystal::Doc::Method
       @def.args.each_with_index do |arg, i|
         io << ", " if printed
         io << '*' if @def.splat_index == i
-        arg_to_html arg, io, links: links
+        arg_to_html arg, io, html: html
         printed = true
       end
       if double_splat = @def.double_splat
@@ -241,8 +272,8 @@ class Crystal::Doc::Method
       if block_arg = @def.block_arg
         io << ", " if printed
         io << '&'
-        arg_to_html block_arg, io, links: links
-      elsif @def.yields
+        arg_to_html block_arg, io, html: html
+      elsif @def.block_arity
         io << ", " if printed
         io << '&'
       end
@@ -254,10 +285,10 @@ class Crystal::Doc::Method
       # Nothing to do
     when ASTNode
       io << " : "
-      node_to_html return_type, io, links: links
+      node_to_html return_type, io, html: html
     when Crystal::Type
       io << " : "
-      @type.type_to_html return_type, io, links: links
+      @type.type_to_html return_type, io, html: html
     end
 
     if free_vars = @def.free_vars
@@ -268,13 +299,14 @@ class Crystal::Doc::Method
     io
   end
 
-  def arg_to_html(arg : Arg, io, links = true)
+  def arg_to_html(arg : Arg, io, html : HTMLOption = :all)
     if arg.external_name != arg.name
       if name = arg.external_name.presence
-        if Symbol.needs_quotes_for_named_argument? name
-          HTML.escape name.inspect, io
-        else
+        name = Symbol.quote_for_named_argument(name)
+        if html.none?
           io << name
+        else
+          HTML.escape name, io
         end
       else
         io << "_"
@@ -286,20 +318,24 @@ class Crystal::Doc::Method
 
     if restriction = arg.restriction
       io << " : "
-      node_to_html restriction, io, links: links
+      node_to_html restriction, io, html: html
     elsif type = arg.type?
       io << " : "
-      @type.type_to_html type, io, links: links
+      @type.type_to_html type, io, html: html
     end
 
     if default_value = arg.default_value
       io << " = "
-      io << Highlighter.highlight(default_value.to_s)
+      if html.highlight?
+        io << SyntaxHighlighter::HTML.highlight!(default_value.to_s)
+      else
+        io << default_value
+      end
     end
   end
 
-  def node_to_html(node, io, links = true)
-    @type.node_to_html node, io, links: links
+  def node_to_html(node, io, html : HTMLOption = :all)
+    @type.node_to_html node, io, html: html
   end
 
   def must_be_included?
@@ -307,22 +343,24 @@ class Crystal::Doc::Method
   end
 
   def has_args?
-    !@def.args.empty? || @def.double_splat || @def.block_arg || @def.yields
+    !@def.args.empty? || @def.double_splat || @def.block_arg || @def.block_arity
   end
 
   def to_json(builder : JSON::Builder)
     builder.object do
-      builder.field "id", id
-      builder.field "html_id", html_id
+      builder.field "html_id", id
       builder.field "name", name
-      builder.field "doc", doc
-      builder.field "summary", formatted_summary
+      builder.field "real_name", real_name if real_name
+      builder.field "doc", doc unless doc.nil?
+      builder.field "summary", formatted_summary unless formatted_summary.nil?
       builder.field "abstract", abstract?
-      builder.field "args", args
-      builder.field "args_string", args_to_s
-      builder.field "args_html", args_to_html
-      builder.field "location", location
-      builder.field "def", self.def
+      builder.field "visibility", visibility if visibility
+      builder.field "args", args unless args.empty?
+      builder.field "args_string", args_to_s unless args.empty?
+      builder.field "args_html", args_to_html unless args.empty?
+      builder.field "location", location unless location.nil?
+      builder.field @type.lib? ? "fun" : "def", self.def
+      builder.field "external_var", external_var?
     end
   end
 

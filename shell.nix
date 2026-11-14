@@ -19,18 +19,19 @@
 # $ nix-shell --pure --arg musl true
 #
 
-{llvm ? 10, musl ? false, system ? builtins.currentSystem}:
+{llvm ? 22, musl ? false, system ? builtins.currentSystem}:
 
 let
   nixpkgs = import (builtins.fetchTarball {
-    name = "nixpkgs-20.03";
-    url = "https://github.com/NixOS/nixpkgs/archive/2d580cd2793a7b5f4b8b6b88fb2ccec700ee1ae6.tar.gz";
-    sha256 = "1nbanzrir1y0yi2mv70h60sars9scwmm0hsxnify2ldpczir9n37";
+    name = "nixpkgs-26.05";
+    url = "https://github.com/NixOS/nixpkgs/archive/26.05.tar.gz";
+    sha256 = "sha256:0am8xx09fx5yf2p0wb001v0jx1g5hrfb76h4r37xph378jgk7pcr";
   }) {
     inherit system;
   };
 
   pkgs = if musl then nixpkgs.pkgsMusl else nixpkgs;
+  llvmPackages = pkgs."llvmPackages_${toString llvm}";
 
   genericBinary = { url, sha256 }:
     pkgs.stdenv.mkDerivation rec {
@@ -38,101 +39,54 @@ let
       src = builtins.fetchTarball { inherit url sha256; };
 
       # Extract only the compiler binary
-      buildCommand = ''
+      installPhase = ''
         mkdir -p $out/bin
 
-        # Darwin packages use embedded/bin/crystal
-        [ ! -f "${src}/embedded/bin/crystal" ] || cp ${src}/embedded/bin/crystal $out/bin/
-
-        # Linux packages use lib/crystal/bin/crystal
-        [ ! -f "${src}/lib/crystal/bin/crystal" ] || cp ${src}/lib/crystal/bin/crystal $out/bin/
+        if [ -f "${src}/embedded/bin/crystal" ]; then
+          # Darwin packages use embedded/bin/crystal
+          cp ${src}/embedded/bin/crystal $out/bin/
+        elif [ -f "${src}/lib/crystal/bin/crystal" ]; then
+          # Older Linux packages use lib/crystal/bin/crystal
+          cp ${src}/lib/crystal/bin/crystal $out/bin/
+        elif [ -f "${src}/bin/crystal" ]; then
+          # Linux packages use bin/crystal
+          cp ${src}/bin/crystal $out/bin/
+        fi
       '';
     };
 
   # Hashes obtained using `nix-prefetch-url --unpack <url>`
   latestCrystalBinary = genericBinary ({
     x86_64-darwin = {
-      url = "https://github.com/crystal-lang/crystal/releases/download/1.0.0/crystal-1.0.0-1-darwin-x86_64.tar.gz";
-      sha256 = "sha256:1ff05f7v31r7xw4xk1a5zns77k3hrgdb9cn15w2zsps83iqlq81i";
+      url = "https://github.com/crystal-lang/crystal/releases/download/1.22.2/crystal-1.22.2-1-darwin-universal.tar.gz";
+      sha256 = "sha256:0qvdz61vrbw511wdvbsdfrysbhcjllddl8k217n2877pj4q3s87h";
+    };
+
+    aarch64-darwin = {
+      url = "https://github.com/crystal-lang/crystal/releases/download/1.22.2/crystal-1.22.2-1-darwin-universal.tar.gz";
+      sha256 = "sha256:0qvdz61vrbw511wdvbsdfrysbhcjllddl8k217n2877pj4q3s87h";
     };
 
     x86_64-linux = {
-      url = "https://github.com/crystal-lang/crystal/releases/download/1.0.0/crystal-1.0.0-1-linux-x86_64.tar.gz";
-      sha256 = "sha256:13940gjs1zl29wrhngzylhckxgzb8xh16bniqik5lslp6qpljqy4";
+      url = "https://github.com/crystal-lang/crystal/releases/download/1.22.2/crystal-1.22.2-1-linux-x86_64.tar.gz";
+      sha256 = "sha256:0nxqaya329kjlmdsmh26lxkimb1pxw3smg6cn1q8v3997hsa8m89";
     };
 
-    i686-linux = {
-      url = "https://github.com/crystal-lang/crystal/releases/download/1.0.0/crystal-1.0.0-1-linux-i686.tar.gz";
-      sha256 = "sha256:18xg2nxg68cx0ngidpzy68wa5zqmcz0xfm0im5sg8j8bnj8ccg35";
+    aarch64-linux = {
+      url = "https://github.com/crystal-lang/crystal/releases/download/1.22.2/crystal-1.22.2-1-linux-aarch64.tar.gz";
+      sha256 = "sha256:1319hx5mirw9j30zkljcl4sr8sjlpb1zihqf85s4j4fb7wka0f0a";
     };
   }.${pkgs.stdenv.system});
 
-  pkgconfig = pkgs.pkgconfig;
-
-  llvm_suite = ({
-    llvm_10 = {
-      llvm = pkgs.llvm_10;
-      extra = [ pkgs.lld_10 pkgs.lldb_10 ];
-    };
-    llvm_9 = {
-      llvm = pkgs.llvm_9;
-      extra = [ ]; # lldb it fails to compile on Darwin
-    };
-    llvm_8 = {
-      llvm = pkgs.llvm_8;
-      extra = [ ]; # lldb it fails to compile on Darwin
-    };
-    llvm_7 = {
-      llvm = pkgs.llvm;
-      extra = [ pkgs.lldb ];
-    };
-    llvm_6 = {
-      llvm = pkgs.llvm_6;
-      extra = [ ]; # lldb it fails to compile on Darwin
-    };
-  }."llvm_${toString llvm}");
-
-  libatomic_ops = builtins.fetchurl {
-    url = "https://github.com/ivmai/libatomic_ops/releases/download/v7.6.10/libatomic_ops-7.6.10.tar.gz";
-    sha256 = "1bwry043f62pc4mgdd37zx3fif19qyrs8f5bw7qxlmkzh5hdyzjq";
-  };
-
-  boehmgc = pkgs.stdenv.mkDerivation rec {
-    pname = "boehm-gc";
-    version = "8.0.4";
-
-    src = builtins.fetchTarball {
-      url = "https://github.com/ivmai/bdwgc/releases/download/v${version}/gc-${version}.tar.gz";
-      sha256 = "16ic5dwfw51r5lcl88vx3qrkg3g2iynblazkri3sl9brnqiyzjk7";
-    };
-
-    patches = [
-      (pkgs.fetchpatch {
-        url = "https://github.com/ivmai/bdwgc/commit/5668de71107022a316ee967162bc16c10754b9ce.patch";
-        sha256 = "02f0rlxl4fsqk1xiq0pabkhwydnmyiqdik2llygkc6ixhxbii8xw";
-      })
-    ];
-
-    postUnpack = ''
-      mkdir $sourceRoot/libatomic_ops
-      tar -xzf ${libatomic_ops} -C $sourceRoot/libatomic_ops --strip-components 1
-    '';
-
-    configureFlags = [
-      "--disable-debug"
-      "--disable-dependency-tracking"
-      "--disable-shared"
-      "--enable-large-config"
-    ];
-
-    enableParallelBuilding = true;
+  boehmgc = pkgs.boehmgc.override {
+    enableLargeConfig = true;
   };
 
   stdLibDeps = with pkgs; [
-      boehmgc gmp libevent libiconv libxml2 libyaml openssl pcre zlib
-    ] ++ stdenv.lib.optionals stdenv.isDarwin [ libiconv ];
+      boehmgc gmp libevent libiconv libxml2 libyaml openssl pcre2 zlib
+    ] ++ lib.optionals stdenv.isDarwin [ libiconv ];
 
-  tools = [ pkgs.hostname pkgs.git llvm_suite.extra ];
+  tools = [ pkgs.hostname pkgs.git llvmPackages.bintools ] ++ pkgs.lib.optional (!llvmPackages.lldb.meta.broken) llvmPackages.lldb;
 in
 
 pkgs.stdenv.mkDerivation rec {
@@ -140,11 +94,12 @@ pkgs.stdenv.mkDerivation rec {
 
   buildInputs = tools ++ stdLibDeps ++ [
     latestCrystalBinary
-    pkgconfig
-    llvm_suite.llvm
+    pkgs.pkg-config
+    llvmPackages.libllvm
+    pkgs.libffi
   ];
 
-  LLVM_CONFIG = "${llvm_suite.llvm}/bin/llvm-config";
+  LLVM_CONFIG = "${llvmPackages.libllvm.dev}/bin/llvm-config";
 
   MACOSX_DEPLOYMENT_TARGET = "10.11";
 }

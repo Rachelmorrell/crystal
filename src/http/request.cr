@@ -1,6 +1,7 @@
 require "./common"
 require "uri"
-require "http/params"
+require "./params"
+require "socket"
 
 # An HTTP request.
 #
@@ -11,105 +12,154 @@ require "http/params"
 # When creating a request with a `String` or `Bytes` its body
 # will be a `IO::Memory` wrapping these, and the `Content-Length`
 # header will be set appropriately.
+#
+# NOTE: To use `Request`, you must explicitly import it with `require "http/request"`
 class HTTP::Request
-  property method : String
+  getter method : String
+  @resource : String
   property headers : Headers
   getter body : IO?
-  property version : String
+  getter version : String
   @cookies : Cookies?
   @query_params : URI::Params?
+  @form_params : HTTP::Params?
   @uri : URI?
 
-  {% unless flag?(:win32) %}
-    # The network address that sent the request to an HTTP server.
-    #
-    # `HTTP::Server` will try to fill this property, and its value
-    # will have a format like "IP:port", but this format is not guaranteed.
-    # Middlewares can overwrite this value.
-    #
-    # This property is not used by `HTTP::Client`.
-    property remote_address : Socket::Address?
+  # The network address that sent the request to an HTTP server.
+  #
+  # `HTTP::Server` will try to fill this property, and its value
+  # will have a format like "IP:port", but this format is not guaranteed.
+  # Middlewares can overwrite this value.
+  #
+  # Example:
+  #
+  # ```
+  # class ForwarderHandler
+  #   include HTTP::Handler
+  #
+  #   def call(context)
+  #     if ip = context.request.headers["X-Real-IP"]? # When using a reverse proxy that guarantees this field.
+  #       context.request.remote_address = Socket::IPAddress.new(ip, 0)
+  #     end
+  #     call_next(context)
+  #   end
+  # end
+  #
+  # server = HTTP::Server.new([ForwarderHandler.new, HTTP::LogHandler.new])
+  # ```
+  #
+  # This property is not used by `HTTP::Client`.
+  @[Deprecated("Use `HTTP::Server::Context#remote_address` instead.")]
+  property remote_address : Socket::Address?
 
-    # The network address of the HTTP server.
-    #
-    # `HTTP::Server` will try to fill this property, and its value
-    # will have a format like "IP:port", but this format is not guaranteed.
-    # Middlewares can overwrite this value.
-    #
-    # This property is not used by `HTTP::Client`.
-    property local_address : Socket::Address?
-  {% else %}
-    # TODO: Remove this once `Socket` is working on Windows
+  # The network address of the HTTP server.
+  #
+  # `HTTP::Server` will try to fill this property, and its value
+  # will have a format like "IP:port", but this format is not guaranteed.
+  # Middlewares can overwrite this value.
+  #
+  # This property is not used by `HTTP::Client`.
+  @[Deprecated("Use `HTTP::Server::Context#local_address` instead.")]
+  property local_address : Socket::Address?
 
-    property remote_address : Nil
-    property local_address : Nil
-  {% end %}
-
-  def self.new(method : String, resource : String, headers : Headers? = nil, body : String | Bytes | IO | Nil = nil, version = "HTTP/1.1")
+  def self.new(method : String, resource : String, headers : Headers? = nil, body : String | Bytes | IO | Nil = nil, version : String = "HTTP/1.1") : self
     # Duplicate headers to prevent the request from modifying data that the user might hold.
     new(method, resource, headers.try(&.dup), body, version, internal: nil)
   end
 
-  private def initialize(@method : String, @resource : String, headers : Headers? = nil, body : String | Bytes | IO | Nil = nil, @version = "HTTP/1.1", *, internal)
+  private def initialize(method : String, resource : String, headers : Headers? = nil, body : String | Bytes | IO | Nil = nil, version : String = "HTTP/1.1", *, internal)
+    @method = HTTP.validate_token(method, "Invalid HTTP method")
+    @resource = HTTP.validate_resource(resource)
     @headers = headers || Headers.new
+    @version = HTTP.validate_version(version)
     self.body = body
+  end
+
+  def method=(method : String) : String
+    @method = HTTP.validate_token(method, "Invalid HTTP method")
+  end
+
+  def version=(version : String) : String
+    @version = HTTP.validate_version(version)
   end
 
   # Returns a convenience wrapper around querying and setting cookie related
   # headers, see `HTTP::Cookies`.
-  def cookies
+  def cookies : HTTP::Cookies
     @cookies ||= Cookies.from_client_headers(headers)
   end
 
   # Returns a convenience wrapper around querying and setting query params,
   # see `URI::Params`.
-  def query_params
+  def query_params : URI::Params
     @query_params ||= uri.query_params
   end
 
-  def resource
+  # Returns a convenience wrapper to parse form params, see `URI::Params`.
+  # Returns `nil` in case the content type `"application/x-www-form-urlencoded"`
+  # is not present or the body is `nil`.
+  def form_params? : HTTP::Params?
+    @form_params ||= begin
+      if (body = self.body) && (ct = headers["Content-Type"]?)
+        mt = MIME::MediaType.parse?(ct)
+        if mt && mt.media_type == "application/x-www-form-urlencoded"
+          if charset = mt["charset"]?
+            body.set_encoding(charset)
+          end
+          HTTP::Params.parse(body.gets_to_end)
+        end
+      end
+    end
+  end
+
+  # Returns a convenience wrapper to parse form params, see `URI::Params`.
+  def form_params : HTTP::Params
+    form_params? || HTTP::Params.new
+  end
+
+  def resource : String
     update_uri
     @uri.try(&.request_target) || @resource
   end
 
-  def keep_alive?
+  def keep_alive? : Bool
     HTTP.keep_alive?(self)
   end
 
-  def ignore_body?
+  def ignore_body? : Bool
     @method == "HEAD"
   end
 
-  def content_length=(length : Int)
-    headers["Content-Length"] = length.to_s
+  def content_length=(length : Int64) : Int64
+    headers["Content-Length"] = HTTP.validate_content_length(length).to_s
+    length
   end
 
-  def content_length
-    HTTP.content_length(headers)
+  def content_length : Int64?
+    HTTP.content_length(headers).try(&.to_i64)
   end
 
-  def body=(body : String)
+  def body=(body : String) : String
     @body = IO::Memory.new(body)
-    self.content_length = body.bytesize
+    body
   end
 
-  def body=(body : Bytes)
+  def body=(body : Bytes) : Bytes
     @body = IO::Memory.new(body)
-    self.content_length = body.size
+    body
   end
 
-  def body=(@body : IO)
+  def body=(@body : IO) : IO
   end
 
-  def body=(@body : Nil)
-    @headers["Content-Length"] = "0" if @method == "POST" || @method == "PUT"
+  def body=(@body : Nil) : Nil
   end
 
-  def to_io(io)
+  def to_io(io : IO) : Nil
     io << @method << ' ' << resource << ' ' << @version << "\r\n"
     cookies = @cookies
     headers = cookies ? cookies.add_request_headers(@headers) : @headers
-    HTTP.serialize_headers_and_body(io, headers, nil, @body, @version)
+    HTTP.serialize_headers_and_body(io, headers, nil, @body, @version, expecting_body: @method.in?("POST", "PUT", "PATCH"))
   end
 
   # :nodoc:
@@ -117,11 +167,11 @@ class HTTP::Request
 
   # Returns a `HTTP::Request` instance if successfully parsed,
   # `nil` on EOF or `HTTP::Status` otherwise.
-  def self.from_io(io, *, max_request_line_size : Int32 = HTTP::MAX_REQUEST_LINE_SIZE, max_headers_size : Int32 = HTTP::MAX_HEADERS_SIZE) : HTTP::Request | HTTP::Status | Nil
+  def self.from_io(io : IO, *, max_request_line_size : Int32 = HTTP::MAX_REQUEST_LINE_SIZE, max_headers_size : Int32 = HTTP::MAX_HEADERS_SIZE) : HTTP::Request | HTTP::Status | Nil
     line = parse_request_line(io, max_request_line_size)
     return line unless line.is_a?(RequestLine)
 
-    status = HTTP.parse_headers_and_body(io, max_headers_size: max_headers_size) do |headers, body|
+    status = HTTP.parse_headers_and_body(io, decompress: false, max_headers_size: max_headers_size) do |headers, body|
       # No need to dup headers since nobody else holds them
       request = new line.method, line.resource, headers, body, line.http_version, internal: nil
 
@@ -237,23 +287,23 @@ class HTTP::Request
   end
 
   # Returns the request's path component.
-  def path
+  def path : String
     uri.path.presence || "/"
   end
 
   # Sets request's path component.
-  def path=(path)
+  def path=(path : String) : String
     uri.path = path
   end
 
   # Lazily parses and returns the request's query component.
-  def query
+  def query : String?
     update_uri
     uri.query
   end
 
   # Sets request's query component.
-  def query=(value)
+  def query=(value : String?) : String?
     uri.query = value
     update_query_params
     value
@@ -261,38 +311,59 @@ class HTTP::Request
 
   # Extracts the hostname from `Host` header.
   #
-  # Returns `nil` if the `Host` header is missing.
+  # Returns `nil` if the `Host` header is missing, if there is more than one
+  # `Host` header, or if the header's value does not resemble a valid
+  # authority component.
   #
   # If the `Host` header contains a port number, it is stripped off.
   def hostname : String?
-    header = @headers["Host"]?
-    return unless header
+    header = @headers.get?("Host")
+    return unless header && header.size == 1
 
-    host, _, port = header.rpartition(":")
-    if host.empty?
-      # no colon in header
-      host = header
+    header = header.first
+
+    if header.starts_with?('[')
+      # unwrap IPv6 literal
+      close_index = header.index(']') || return
+      host = header.byte_slice(1, close_index - 1)
+      if close_index + 1 < header.bytesize
+        port_index = close_index + 1
+        return unless header.byte_at(port_index) === ':'
+      end
     else
-      port = port.to_i?(whitespace: false)
-      # TODO: Remove temporal fix when Socket::IPAddress has been ported to
-      # win32
-      unless port && {% if flag?(:win32) %}port.in?(0..UInt16::MAX){% else %}Socket::IPAddress.valid_port?(port){% end %}
-        # what we identified as port is not valid, so use the entire header
+      port_index = header.index(':')
+      if port_index
+        host = header.byte_slice(0, port_index)
+        return if host.index(':') # invalid host with multiple colons
+      else
         host = header
       end
     end
 
-    URI.unwrap_ipv6(host)
+    return if host.empty?
+
+    if port_index
+      # validate port index
+      return unless header.bytesize > port_index
+      port = header.byte_slice(port_index + 1).to_i?(whitespace: false) || return
+
+      return unless Socket::IPAddress.valid_port?(port)
+    end
+
+    host
   end
 
   # Returns request host with port from headers.
   @[Deprecated(%q(Use `headers["Host"]?` instead.))]
-  def host_with_port
+  def host_with_port : String?
     @headers["Host"]?
   end
 
-  private def uri
-    (@uri ||= URI.parse(@resource)).not_nil!
+  # Returns the underlying URI object.
+  #
+  # Used internally to provide the components of the request uri.
+  def uri : URI
+    @uri ||= URI::Parser.new(@resource).parse_request_target.uri
   end
 
   private def update_query_params
@@ -303,6 +374,29 @@ class HTTP::Request
   private def update_uri
     return unless @query_params
     uri.query = query_params.to_s
+  end
+
+  # :nodoc:
+  #
+  # This method is used by `HTTP::Client` to determine whether it can safely retry a request.
+  # Returns `true` if this request is expected to be replayable, i.e. if making
+  # multiple identical requests has the same effect on the server as making a
+  # single request.
+  #
+  # This is only an expectation based on request properties. The actual server
+  # may behave differently, and even a `GET` request might cause side effects.
+  #
+  # Closely related to [idempotency] in the HTTP spec, but only the “safe”
+  # methods `GET`, `HEAD`, `OPTIONS`, and `TRACE` are considered replayable unless
+  # there is an explicit idempotency header. Requests with a body (including form
+  # params) are never replayable.
+  #
+  # [idempotency]: https://httpwg.org/specs/rfc9110.html#idempotent.methods
+  def replayable? : Bool
+    @body.nil? && @form_params.nil? && (
+      @method.in?("GET", "HEAD", "OPTIONS", "TRACE") ||
+        headers.has_key?("Idempotency-Key") || headers.has_key?("X-Idempotency-Key")
+    )
   end
 
   def if_match : Array(String)?
@@ -324,7 +418,7 @@ class HTTP::Request
 
     require_comma = false
     while reader.has_next?
-      case char = reader.current_char
+      case reader.current_char
       when ' ', '\t'
         reader.next_char
       when ','
@@ -366,7 +460,7 @@ class HTTP::Request
     reader.next_char
 
     while reader.has_next?
-      case char = reader.current_char
+      case reader.current_char
       when '!', '\u{23}'..'\u{7E}', '\u{80}'..'\u{FF}'
         reader.next_char
       when '"'

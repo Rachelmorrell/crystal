@@ -6,17 +6,17 @@ describe "Code gen: macro" do
   end
 
   it "expands macro with arguments" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo(n)
         {{n}} &+ 2
       end
 
       foo(1)
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands macro that invokes another macro" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo
         def x
           1 &+ 2
@@ -29,11 +29,11 @@ describe "Code gen: macro" do
 
       bar
       x
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands macro defined in class" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         macro foo
           def bar
@@ -46,11 +46,11 @@ describe "Code gen: macro" do
 
       foo = Foo.new
       foo.bar
-    )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands macro defined in base class" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Object
         macro foo
           def bar
@@ -65,48 +65,48 @@ describe "Code gen: macro" do
 
       foo = Foo.new
       foo.bar
-    )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands inline macro" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       a = {{ 1 }}
       a
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands inline macro for" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       a = 0
       {% for i in [1, 2, 3] %}
         a &+= {{i}}
       {% end %}
       a
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "expands inline macro if (true)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       a = 0
       {% if 1 == 1 %}
         a &+= 1
       {% end %}
       a
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands inline macro if (false)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(0)
       a = 0
       {% if 1 == 2 %}
         a &+= 1
       {% end %}
       a
-      )).to_i.should eq(0)
+      CRYSTAL
   end
 
   it "finds macro in class" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       class Foo
         macro foo
           1 &+ 2
@@ -118,11 +118,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.bar
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands def macro" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       def bar_baz
         1
       end
@@ -134,11 +134,11 @@ describe "Code gen: macro" do
       end
 
       foo
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands def macro with var" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         def foo : Int32
           {{ @type }}
@@ -147,11 +147,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.foo
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands def macro with @type.instance_vars" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("x")
       class Foo
         def initialize(@x : Int32)
         end
@@ -163,11 +163,11 @@ describe "Code gen: macro" do
 
       foo = Foo.new(1)
       foo.to_s
-      )).to_string.should eq("x")
+      CRYSTAL
   end
 
   it "expands def macro with @type.instance_vars with subclass" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("y")
       class Reference
         def to_s : String
           {{ @type.instance_vars.last.stringify }}
@@ -185,11 +185,11 @@ describe "Code gen: macro" do
       end
 
       Bar.new(1, 2).to_s
-      )).to_string.should eq("y")
+      CRYSTAL
   end
 
   it "expands def macro with @type.instance_vars with virtual" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("y")
       class Reference
         def to_s : String
           {{ @type.instance_vars.last.stringify }}
@@ -207,11 +207,11 @@ describe "Code gen: macro" do
       end
 
       (Bar.new(1, 2) || Foo.new(1)).to_s
-      )).to_string.should eq("y")
+      CRYSTAL
   end
 
   it "expands def macro with @type.name" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Foo
         def initialize(@x : Int32)
         end
@@ -223,11 +223,11 @@ describe "Code gen: macro" do
 
       foo = Foo.new(1)
       foo.to_s
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "expands macro and resolves type correctly" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         def foo : Int32
           {{ @type }}
@@ -240,11 +240,11 @@ describe "Code gen: macro" do
       end
 
       Bar.new.foo
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands def macro with @type.name with virtual" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Bar")
       class Reference
         def to_s : String
           {{ @type.name.stringify }}
@@ -258,11 +258,11 @@ describe "Code gen: macro" do
       end
 
       (Bar.new || Foo.new).to_s
-      )).to_string.should eq("Bar")
+      CRYSTAL
   end
 
   it "expands def macro with @type.name with virtual (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Reference
         def to_s : String
           {{ @type.name.stringify }}
@@ -276,11 +276,11 @@ describe "Code gen: macro" do
       end
 
       (Foo.new || Bar.new).to_s
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "allows overriding macro definition when redefining base class" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("OH NO")
       class Foo
         def inspect : String
           {{@type.name.stringify}}
@@ -297,11 +297,11 @@ describe "Code gen: macro" do
       end
 
       Bar.new.inspect
-      )).to_string.should eq("OH NO")
+      CRYSTAL
   end
 
   it "uses invocation context" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       macro foo
         def bar
           {{@type.name.stringify}}
@@ -313,11 +313,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.bar
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "allows macro with default arguments" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       def bar
         2
       end
@@ -327,11 +327,11 @@ describe "Code gen: macro" do
       end
 
       foo(1)
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands def macro with instance var and method call (bug)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       struct Nil
         def to_i!
           0
@@ -349,11 +349,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.foo.to_i!
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands @type.name in virtual metaclass (1)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Class
         def to_s : String
           {{ @type.name.stringify }}
@@ -370,11 +370,11 @@ describe "Code gen: macro" do
       p.value = Bar
       p.value = Foo
       p.value.to_s
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "expands @type.name in virtual metaclass (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Bar")
       class Class
         def to_s : String
           {{ @type.name.stringify }}
@@ -391,11 +391,64 @@ describe "Code gen: macro" do
       p.value = Foo
       p.value = Bar
       p.value.to_s
-      )).to_string.should eq("Bar")
+      CRYSTAL
+  end
+
+  it "expands @type.name in virtual metaclass with generic subclasses (1)" do
+    run(<<-CRYSTAL).to_string.should eq("Bar(Int32)")
+      class Class
+        def to_s : String
+          {{ @type.name.stringify }}
+        end
+      end
+
+      class Foo
+      end
+
+      class Bar(T) < Foo
+      end
+
+      def name_of(klass : Foo.class)
+        klass.to_s
+      end
+
+      p = Pointer(Foo.class).malloc(1_u64)
+      p.value = Bar(Int32)
+      name_of(p.value)
+      p.value = Bar(Char)
+      p.value = Bar(Int32)
+      name_of(p.value)
+      CRYSTAL
+  end
+
+  it "expands @type.name in virtual metaclass with generic subclasses (2)" do
+    run(<<-CRYSTAL).to_string.should eq("Bar(Char)")
+      class Class
+        def to_s : String
+          {{ @type.name.stringify }}
+        end
+      end
+
+      class Foo
+      end
+
+      class Bar(T) < Foo
+      end
+
+      def name_of(klass : Foo.class)
+        klass.to_s
+      end
+
+      p = Pointer(Foo.class).malloc(1_u64)
+      p.value = Bar(Int32)
+      name_of(p.value)
+      p.value = Bar(Char)
+      name_of(p.value)
+      CRYSTAL
   end
 
   it "doesn't skip abstract classes when defining macro methods" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       class Object
         def foo : Int32
           {{ @type }}
@@ -420,11 +473,11 @@ describe "Code gen: macro" do
 
       t = Type1.new || Type2.new
       t.foo
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "doesn't reuse macro nodes (bug)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       struct Float
         def &+(other)
           self + other
@@ -439,18 +492,18 @@ describe "Code gen: macro" do
 
       foo 1
       foo(1.5).to_i!
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "can use constants" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       CONST = 1
       {{ CONST }}
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "can refer to types" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("y")
       class Foo
         def initialize(@x : Int32, @y : Int32)
         end
@@ -463,31 +516,31 @@ describe "Code gen: macro" do
       end
 
       Foo.new(1, 2).foo
-      )).to_string.should eq("y")
+      CRYSTAL
   end
 
   it "runs macro with splat" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo(*args)
         {{args.size}}
       end
 
       foo 1, 1, 1
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "runs macro with arg and splat" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo(name, *args)
         {{args.size}}
       end
 
       foo bar, 1, 1, 1
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands macro that yields" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       def foo
         {% for i in 0 .. 2 %}
           yield {{i}}
@@ -499,29 +552,29 @@ describe "Code gen: macro" do
         a &+= x
       end
       a
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "can refer to abstract (1)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       class Foo
       end
 
       {{ Foo.abstract? }}
-      )).to_b.should be_false
+      CRYSTAL
   end
 
   it "can refer to abstract (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       abstract class Foo
       end
 
       {{ Foo.abstract? }}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "can refer to @type" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Foo
         def foo : String
           {{@type.name.stringify}}
@@ -529,17 +582,17 @@ describe "Code gen: macro" do
       end
 
       Foo.new.foo
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "can refer to union (1)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       {{Int32.union?}}
-    )).to_b.should be_false
+      CRYSTAL
   end
 
   it "can refer to union (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
         def initialize
           @x = 1; @x = 1.1
@@ -549,82 +602,80 @@ describe "Code gen: macro" do
         end
       end
       Foo.new.foo
-    )).to_b.should be_true
+      CRYSTAL
   end
 
   it "can iterate union types" do
-    run(%(
-      require "prelude"
+    run(<<-CRYSTAL).to_string.should eq("Float64-Int32")
       class Foo
         def initialize
           @x = 1; @x = 1.1
         end
         def foo
-          {{ @type.instance_vars.first.type.union_types.map(&.name).sort }}.join('-')
+          {{ @type.instance_vars.first.type.union_types.map(&.name).sort.join("-") }}
         end
       end
       Foo.new.foo
-    )).to_string.should eq("Float64-Int32")
+      CRYSTAL
   end
 
   it "can access type variables" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Int32")
       class Foo(T)
         def foo
           {{ @type.type_vars.first.name.stringify }}
         end
       end
       Foo(Int32).new.foo
-    )).to_string.should eq("Int32")
+      CRYSTAL
   end
 
   it "can access type variables of a module" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Int32")
       module Foo(T)
         def self.foo
           {{ @type.type_vars.first.name.stringify }}
         end
       end
       Foo(Int32).foo
-    )).to_string.should eq("Int32")
+      CRYSTAL
   end
 
   it "can access type variables that are not types" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo(T)
         def foo
           {{ @type.type_vars.first.is_a?(NumberLiteral) }}
         end
       end
       Foo(1).new.foo
-    )).to_b.should eq(true)
+      CRYSTAL
   end
 
   it "can access type variables of a tuple" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Int32")
       struct Tuple
         def foo
           {{ @type.type_vars.first.name.stringify }}
         end
       end
       {1, 2, 3}.foo
-    )).to_string.should eq("Int32")
+      CRYSTAL
   end
 
   it "can access type variables of a generic type" do
-    run(%(
-      require "prelude"
+    run(<<-CRYSTAL).to_string.should eq("T-K")
       class Foo(T, K)
         def self.foo : String
-          {{ @type.type_vars.map(&.stringify) }}.join('-')
+          {{ @type.type_vars.map(&.stringify).join("-") }}
         end
       end
       Foo.foo
-    )).to_string.should eq("T-K")
+      CRYSTAL
   end
 
   it "receives &block" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       macro foo(&block)
         bar {{block}}
       end
@@ -636,21 +687,21 @@ describe "Code gen: macro" do
       foo do |x|
         x &+ 1
       end
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "executes with named arguments" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo(x = 1)
         {{x}} &+ 1
       end
 
       foo x: 2
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "gets correct class name when there are classes in the middle" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Qux")
       class Foo
         def class_desc : String
           {{@type.name.stringify}}
@@ -669,11 +720,11 @@ describe "Code gen: macro" do
       a = Pointer(Foo).malloc(1_u64)
       a.value = Qux.new
       a.value.class_desc
-      )).to_string.should eq("Qux")
+      CRYSTAL
   end
 
   it "transforms hooks (bug)" do
-    codegen(%(
+    codegen(<<-CRYSTAL)
       require "prelude"
 
       module GC
@@ -692,13 +743,11 @@ describe "Code gen: macro" do
 
       class Bar < Foo
       end
-      ))
+      CRYSTAL
   end
 
   it "executes subclasses" do
-    run(%(
-      require "prelude"
-
+    run(<<-CRYSTAL).to_string.should eq("Bar-Baz")
       class Foo
       end
 
@@ -711,15 +760,12 @@ describe "Code gen: macro" do
       class Qux < Baz
       end
 
-      names = {{ Foo.subclasses.map &.name }}
-      names.join('-')
-      )).to_string.should eq("Bar-Baz")
+      {{ Foo.subclasses.map(&.name).join("-") }}
+      CRYSTAL
   end
 
   it "executes all_subclasses" do
-    run(%(
-      require "prelude"
-
+    run(<<-CRYSTAL).to_string.should eq("Bar-Baz")
       class Foo
       end
 
@@ -729,13 +775,12 @@ describe "Code gen: macro" do
       class Baz < Bar
       end
 
-      names = {{ Foo.all_subclasses.map &.name }}
-      names.join('-')
-      )).to_string.should eq("Bar-Baz")
+      {{ Foo.all_subclasses.map(&.name).join("-") }}
+      CRYSTAL
   end
 
   it "gets enum members with @type.constants" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(0 + 1 + 2)
       enum Color
         Red
         Green
@@ -755,11 +800,11 @@ describe "Code gen: macro" do
       end
 
       Color.red.value &+ Color.green.value &+ Color.blue.value
-      )).to_i.should eq(0 + 1 + 2)
+      CRYSTAL
   end
 
   it "gets enum members as constants" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Green")
       enum Color
         Red
         Green
@@ -767,11 +812,11 @@ describe "Code gen: macro" do
       end
 
       {{Color.constants[1].stringify}}
-      )).to_string.should eq("Green")
+      CRYSTAL
   end
 
   it "says that enum has Flags annotation" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       @[Flags]
       enum Color
         Red
@@ -780,11 +825,11 @@ describe "Code gen: macro" do
       end
 
       {{Color.annotation(Flags) ? true : false}}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "says that enum doesn't have Flags annotation" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       enum Color
         Red
         Green
@@ -792,11 +837,45 @@ describe "Code gen: macro" do
       end
 
       {{Color.annotation(Flags) ? true : false}}
-      )).to_b.should be_false
+      CRYSTAL
+  end
+
+  it "says that enum inherits from `Enum`" do
+    run(<<-CRYSTAL, Bool).should be_true
+      enum Foo
+        X
+      end
+
+      {{ Foo.superclass == Enum }}
+      CRYSTAL
+
+    run(<<-CRYSTAL, Bool).should be_true
+      @[Flags]
+      enum Foo
+        X
+      end
+
+      {{ Foo.superclass == Enum }}
+      CRYSTAL
+  end
+
+  it "gets all subclasses of `Enum`" do
+    run(<<-CRYSTAL, Bool).should be_true
+      enum Foo
+        X
+      end
+
+      @[Flags]
+      enum Bar
+        Y
+      end
+
+      {{ Enum.subclasses.includes?(Foo) && Enum.subclasses.includes?(Bar) }}
+      CRYSTAL
   end
 
   it "gets methods" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("bar")
       class Foo
         def bar
           1
@@ -808,13 +887,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.first_method_name
-      )).to_string.should eq("bar")
+      CRYSTAL
   end
 
   it "copies base macro def to sub-subtype even after it was copied to a subtype (#448)" do
-    run(%(
-      require "prelude"
-
+    run(<<-CRYSTAL).to_string.should eq("Baz")
       class Object
         def class_name : String
           {{@type.name.stringify}}
@@ -841,11 +918,11 @@ describe "Code gen: macro" do
       class Baz < Bar; end
       Foo.children.value = Baz.new
       Foo.children.value.class_name
-      )).to_string.should eq("Baz")
+      CRYSTAL
   end
 
   it "recalculates method when virtual metaclass type is added" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Test, RunnableTest")
       require "prelude"
 
       class Global
@@ -893,11 +970,11 @@ describe "Code gen: macro" do
 
       run
       Global.x.join(", ")
-      )).to_string.should eq("Test, RunnableTest")
+      CRYSTAL
   end
 
   it "correctly recomputes call (bug)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Baz")
       class Object
         def in_object
           in_class(1)
@@ -928,11 +1005,11 @@ describe "Code gen: macro" do
 
       f2 = Baz.new || Foo.new
       f2.class.in_object
-      )).to_string.should eq("Baz")
+      CRYSTAL
   end
 
   it "doesn't override local variable when using macro variable" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       macro foo(x)
         %a = {{x}}
         %a
@@ -942,11 +1019,11 @@ describe "Code gen: macro" do
       foo(2)
       foo(3)
       a
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "doesn't override local variable when using macro variable (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(26)
       macro foo(x)
         %a = {{x}} &+ 10
         %a
@@ -956,11 +1033,11 @@ describe "Code gen: macro" do
       z = foo(2)
       w = foo(3)
       a &+ z &+ w
-      )).to_i.should eq(26)
+      CRYSTAL
   end
 
   it "uses indexed macro variable" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(4 + 5 + 6 + 40 + 50 + 60)
       macro foo(*elems)
         {% for elem, i in elems %}
           %var{i} = {{elem}}
@@ -977,11 +1054,11 @@ describe "Code gen: macro" do
       z &+= foo 4, 5, 6
       z &+= foo 40, 50, 60
       z
-      )).to_i.should eq(4 + 5 + 6 + 40 + 50 + 60)
+      CRYSTAL
   end
 
   it "uses indexed macro variable with many keys" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(4 + 5 + 6)
       macro foo(*elems)
         {% for elem, i in elems %}
           %var{elem, i} = {{elem}}
@@ -996,11 +1073,11 @@ describe "Code gen: macro" do
 
       z = foo 4, 5, 6
       z
-      )).to_i.should eq(4 + 5 + 6)
+      CRYSTAL
   end
 
   it "codegens macro def with splat (#496)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Foo
         def bar(*args) : Int32
           {{ @type }}
@@ -1009,11 +1086,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.bar(1, 2, 3)
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "codegens macro def with default arg (similar to #496)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       class Foo
         def bar(foo = 1) : Int32
           {{ @type }}
@@ -1022,41 +1099,41 @@ describe "Code gen: macro" do
       end
 
       Foo.new.bar
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "expands macro with default arg and splat (#784)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("5")
       macro some_macro(a=5, *args)
         {{a.stringify}}
       end
 
       some_macro
-      )).to_string.should eq("5")
+      CRYSTAL
   end
 
   it "expands macro with default arg and splat (2) (#784)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("1")
       macro some_macro(a=5, *args)
         {{a.stringify}}
       end
 
       some_macro 1, 2, 3, 4
-      )).to_string.should eq("1")
+      CRYSTAL
   end
 
   it "expands macro with default arg and splat (3) (#784)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro some_macro(a=5, *args)
         {{args.size}}
       end
 
       some_macro 1, 2, 3, 4
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "checks if macro expansion returns (#821)" do
-    run(%(
+    run(<<-CRYSTAL, inject_primitives: false).to_i.should eq(123)
       macro pass
         return 123
       end
@@ -1067,11 +1144,11 @@ describe "Code gen: macro" do
       end
 
       me || 0
-      ), inject_primitives: false).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "passes #826" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       macro foo
         macro bar
           {{yield}}
@@ -1083,11 +1160,11 @@ describe "Code gen: macro" do
       end
 
       bar
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "declares constant in macro (#838)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       macro foo
         {{yield}}
       end
@@ -1097,11 +1174,11 @@ describe "Code gen: macro" do
       end
 
       CONST
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "errors if dynamic constant assignment after macro expansion" do
-    assert_error %(
+    assert_error <<-CRYSTAL, "dynamic constant assignment. Constants can only be declared at the top level or inside other types."
       macro foo
         X = 123
       end
@@ -1111,12 +1188,11 @@ describe "Code gen: macro" do
       end
 
       bar
-      ),
-      "dynamic constant assignment. Constants can only be declared at the top level or inside other types."
+      CRYSTAL
   end
 
   it "finds macro from virtual type" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       class Foo
         macro foo
           123
@@ -1133,21 +1209,21 @@ describe "Code gen: macro" do
       a = Pointer(Foo).malloc(1_u64)
       a.value = Foo.new
       a.value.bar
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "expands macro with escaped quotes (#895)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq(%(hello"))
       macro foo(x)
         "{{x}}\\""
       end
 
       foo hello
-      )).to_string.should eq(%(hello"))
+      CRYSTAL
   end
 
   it "expands macro def with return (#1040)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       class Foo
         def a : Int32
           {{ @type }}
@@ -1156,11 +1232,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.a
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "fixes empty types of macro expansions (#1379)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       macro lala(exp)
         {{exp}}
       end
@@ -1176,11 +1252,11 @@ describe "Code gen: macro" do
       end
 
       lala foo
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "expands macro as class method" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         macro bar
           1
@@ -1188,11 +1264,11 @@ describe "Code gen: macro" do
       end
 
       Foo.bar
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands macro as class method and accesses @type" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Foo
         macro bar
           {{@type.stringify}}
@@ -1200,22 +1276,22 @@ describe "Code gen: macro" do
       end
 
       Foo.bar
-      )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "codegens macro with comment (bug) (#1396)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       macro my_macro
         # {{ 1 }}
         {{ 1 }}
       end
 
       my_macro
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "correctly resolves constant inside block in macro def" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(123)
       def foo
         yield
       end
@@ -1230,21 +1306,21 @@ describe "Code gen: macro" do
       end
 
       Foo.bar
-      )).to_i.should eq(123)
+      CRYSTAL
   end
 
   it "can access free variables" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Int32")
       def foo(x : T) forall T
         {{ T.stringify }}
       end
 
       foo(1)
-      )).to_string.should eq("Int32")
+      CRYSTAL
   end
 
   it "types macro expansion bug (#1734)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         def foo : Int32
           {{ @type }}
@@ -1257,11 +1333,11 @@ describe "Code gen: macro" do
 
       x = true ? Foo.new : Bar.new
       x.foo
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands Path with resolve method" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       CONST = 1
 
       macro id(path)
@@ -1269,33 +1345,11 @@ describe "Code gen: macro" do
       end
 
       id(CONST)
-      )).to_i.should eq(1)
-  end
-
-  it "solves macro expression arguments before macro expansion (type)" do
-    run(%(
-      macro name(x)
-        {{x.name.stringify}}
-      end
-
-      name({{String}})
-      )).to_string.should eq("String")
-  end
-
-  it "solves macro expression arguments before macro expansion (constant)" do
-    run(%(
-      CONST = 1
-
-      macro id(x)
-        {{x}}
-      end
-
-      id({{CONST}})
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "can use macro inside array literal" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(42)
       require "prelude"
 
       macro foo
@@ -1304,11 +1358,11 @@ describe "Code gen: macro" do
 
       ary = [foo]
       ary[0]
-      )).to_i.should eq(42)
+      CRYSTAL
   end
 
   it "can use macro inside hash literal" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(42)
       require "prelude"
 
       macro foo
@@ -1317,31 +1371,31 @@ describe "Code gen: macro" do
 
       hash = {foo => foo}
       hash[foo]
-      )).to_i.should eq(42)
+      CRYSTAL
   end
 
   it "executes with named arguments for positional arg (1)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       macro foo(x)
         {{x}} &+ 1
       end
 
       foo x: 2
-      )).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "executes with named arguments for positional arg (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       macro foo(x, y)
         {{x}} &+ {{y}} &+ 1
       end
 
       foo x: 2, y: 3
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "executes with named arguments for positional arg (3)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class String
         def bytesize
           @bytesize
@@ -1353,11 +1407,11 @@ describe "Code gen: macro" do
       end
 
       foo y: "foo", x: 2
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "stringifies type without virtual marker" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       class Foo
         def foo_m : Int32
           {{ @type }}.foo
@@ -1375,11 +1429,11 @@ describe "Code gen: macro" do
       end
 
       (Bar.new || Foo.new).foo_m
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "uses tuple T in method with free vars" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       struct Tuple
         def foo(x : U) forall U
           {{T.size}}
@@ -1387,11 +1441,11 @@ describe "Code gen: macro" do
       end
 
       {1, 3}.foo(1)
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "implicitly marks method as macro def when using @type" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Bar")
       class Foo
         def method
           {{@type.stringify}}
@@ -1402,49 +1456,49 @@ describe "Code gen: macro" do
       end
 
       Bar.new.as(Foo).method
-      )).to_string.should eq("Bar")
+      CRYSTAL
   end
 
   it "doesn't replace %s in string (#2178)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("hello %s")
       {% begin %}
         "hello %s"
       {% end %}
-      )).to_string.should eq("hello %s")
+      CRYSTAL
   end
 
   it "doesn't replace %q() (#2178)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("hello")
       {% begin %}
         %q(hello)
       {% end %}
-      )).to_string.should eq("hello")
+      CRYSTAL
   end
 
   it "replaces %s inside string inside interpolation (#2178)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("hello world")
       require "prelude"
 
       {% begin %}
         %a = "world"
         "hello \#{ %a }"
       {% end %}
-      )).to_string.should eq("hello world")
+      CRYSTAL
   end
 
   it "replaces %s inside string inside interpolation, with braces (#2178)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq(%(hello [{"world", "world"}, "world"]))
       require "prelude"
 
       {% begin %}
         %a = "world"
         "hello \#{ [{ %a, %a }, %a] }"
       {% end %}
-      )).to_string.should eq(%(hello [{"world", "world"}, "world"]))
+      CRYSTAL
   end
 
   it "retains original yield expression (#2923)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("hi")
       macro foo
         def bar(baz)
           {{yield}}
@@ -1456,11 +1510,11 @@ describe "Code gen: macro" do
       end
 
       bar("hi")
-      )).to_string.should eq("hi")
+      CRYSTAL
   end
 
   it "surrounds {{yield}} with begin/end" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       macro foo
         a = {{yield}}
       end
@@ -1471,11 +1525,11 @@ describe "Code gen: macro" do
         2
       end
       a
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "initializes instance var in macro" do
-    run(%(
+    run(<<-CRYSTAL, inject_primitives: false).to_i.should eq(1)
       class Foo
         {% begin %}
           @x = 1
@@ -1483,11 +1537,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.@x
-      ), inject_primitives: false).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "initializes class var in macro" do
-    run(%(
+    run(<<-CRYSTAL, inject_primitives: false).to_i.should eq(1)
       class Foo
         {% begin %}
           @@x = 1
@@ -1499,21 +1553,21 @@ describe "Code gen: macro" do
       end
 
       Foo.x
-      ), inject_primitives: false).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands @def in inline macro" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("foo")
       def foo
         {{@def.name.stringify}}
       end
 
       foo
-      )).to_string.should eq("foo")
+      CRYSTAL
   end
 
   it "expands @def in macro" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("bar")
       macro foo
         {{@def.name.stringify}}
       end
@@ -1523,21 +1577,21 @@ describe "Code gen: macro" do
       end
 
       bar
-      )).to_string.should eq("bar")
+      CRYSTAL
   end
 
   it "gets constant" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(42)
       class Foo
         Bar = 42
       end
 
       {{ Foo.constant("Bar") }}
-      )).to_i.should eq(42)
+      CRYSTAL
   end
 
   it "determines if overrides (false)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       class Foo
         def foo
           1
@@ -1548,11 +1602,11 @@ describe "Code gen: macro" do
       end
 
       {{ Bar.overrides?(Foo, "foo") }}
-      )).to_b.should be_false
+      CRYSTAL
   end
 
   it "determines if overrides (true)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
         def foo
           1
@@ -1566,11 +1620,11 @@ describe "Code gen: macro" do
       end
 
       {{ Bar.overrides?(Foo, "foo") }}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "determines if overrides, through another class (true)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
         def foo
           1
@@ -1587,11 +1641,11 @@ describe "Code gen: macro" do
       end
 
       {{ Baz.overrides?(Foo, "foo") }}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "determines if overrides, through module (true)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
         def foo
           1
@@ -1612,11 +1666,11 @@ describe "Code gen: macro" do
       end
 
       {{ Baz.overrides?(Foo, "foo") }}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "determines if overrides, with macro method (false)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       class Foo
         def foo
           {{ @type }}
@@ -1633,11 +1687,11 @@ describe "Code gen: macro" do
       end
 
       x
-      )).to_b.should be_false
+      CRYSTAL
   end
 
   it "determines if method exists (true)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
         def foo
           42
@@ -1645,11 +1699,11 @@ describe "Code gen: macro" do
       end
 
       {{ Foo.has_method?(:foo) }}
-      )).to_b.should be_true
+      CRYSTAL
   end
 
   it "determines if method exists (false)" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_false
       class Foo
         def foo
           42
@@ -1657,11 +1711,11 @@ describe "Code gen: macro" do
       end
 
       {{ Foo.has_method?(:bar) }}
-      )).to_b.should be_false
+      CRYSTAL
   end
 
   it "forwards file location" do
-    run(%(
+    run(<<-CRYSTAL, filename: "bar.cr").to_string.should eq("bar.cr")
       macro foo
         bar
       end
@@ -1671,11 +1725,11 @@ describe "Code gen: macro" do
       end
 
       foo
-      ), filename: "bar.cr").to_string.should eq("bar.cr")
+      CRYSTAL
   end
 
   it "forwards dir location" do
-    run(%(
+    run(<<-CRYSTAL, filename: "somedir/bar.cr").to_string.should eq("somedir")
       macro foo
         bar
       end
@@ -1685,11 +1739,11 @@ describe "Code gen: macro" do
       end
 
       foo
-      ), filename: "somedir/bar.cr").to_string.should eq("somedir")
+      CRYSTAL
   end
 
   it "forwards line number" do
-    run(%(
+    run(<<-CRYSTAL, filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(9)
       macro foo
         bar
       end
@@ -1699,22 +1753,22 @@ describe "Code gen: macro" do
       end
 
       foo
-      ), filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(10)
+      CRYSTAL
   end
 
   it "keeps line number with no block" do
-    run(%(
+    run(<<-CRYSTAL, filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(6)
       macro foo
         {{ yield }}
         __LINE__
       end
 
       foo
-    ), filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(7)
+      CRYSTAL
   end
 
   it "keeps line number with a block" do
-    run(%(
+    run(<<-CRYSTAL, filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(6)
       macro foo
         {{ yield }}
         __LINE__
@@ -1723,19 +1777,19 @@ describe "Code gen: macro" do
       foo do
         1
       end
-    ), filename: "somedir/bar.cr", inject_primitives: false).to_i.should eq(7)
+      CRYSTAL
   end
 
   it "resolves alias in macro" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       alias Foo = Int32 | String
 
       {{ Foo.union_types.size }}
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "gets default value of instance variable" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         @x = 1
 
@@ -1745,11 +1799,11 @@ describe "Code gen: macro" do
       end
 
       Foo.new.default
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "gets default value of instance variable of generic type" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(10)
       require "prelude"
 
       struct Int32
@@ -1767,11 +1821,11 @@ describe "Code gen: macro" do
       end
 
       Foo(Int32).new.default
-      )).to_i.should eq(10)
+      CRYSTAL
   end
 
   it "gets default value of instance variable of inherited type that also includes module" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(10)
       module Moo
         @moo = 10
       end
@@ -1788,11 +1842,11 @@ describe "Code gen: macro" do
       end
 
       Bar.new.foo
-      )).to_i.should eq(10)
+      CRYSTAL
   end
 
   it "determines if variable has default value" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       class Foo
         @x = 1
         @y : Int32
@@ -1813,11 +1867,11 @@ describe "Code gen: macro" do
       a &+= 1 if x
       a &+= 2 if y
       a
-    )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "expands macro with op assign inside assign (#5568)" do
-    run(%(
+    run(<<-CRYSTAL).to_string.chomp.should eq("2")
       require "prelude"
 
       macro expand
@@ -1832,11 +1886,11 @@ describe "Code gen: macro" do
         x = foo[:foo] += 1
         puts x
       end
-    )).to_string.chomp.should eq("2")
+      CRYSTAL
   end
 
   it "devirtualizes @type" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("Foo")
       class Foo
         def foo
           {{@type.id.stringify}}
@@ -1847,11 +1901,11 @@ describe "Code gen: macro" do
       end
 
       (Foo.new || Bar.new).foo
-    )).to_string.should eq("Foo")
+      CRYSTAL
   end
 
   it "keeps heredoc contents inside macro" do
-    run(%(
+    run(<<-CRYSTAL).to_string.should eq("  %foo")
       macro foo
         <<-FOO
           %foo
@@ -1859,21 +1913,67 @@ describe "Code gen: macro" do
       end
 
       foo
-    )).to_string.should eq("  %foo")
+      CRYSTAL
   end
 
   it "keeps heredoc contents with interpolation inside macro" do
-    run(%q(
+    run(<<-CRYSTAL).to_string.should eq("  42")
       require "prelude"
 
       macro foo
         %foo = 42
         <<-FOO
-          #{ %foo }
+          \#{ %foo }
         FOO
       end
 
       foo
-    )).to_string.should eq("  42")
+      CRYSTAL
+  end
+
+  it "access to the program with @top_level" do
+    run(<<-CRYSTAL).to_string.should eq("main")
+      class Foo
+        def bar
+          {{@top_level.name.stringify}}
+        end
+      end
+
+      Foo.new.bar
+      CRYSTAL
+  end
+
+  it "responds correctly to has_constant? with @top_level" do
+    run(<<-CRYSTAL).to_b.should be_true
+      FOO = 1
+      class Foo
+        def bar
+          {{@top_level.has_constant?("FOO")}}
+        end
+      end
+
+      Foo.new.bar
+      CRYSTAL
+  end
+
+  it "does block unpacking inside macro expression (#13707)" do
+    run(<<-CRYSTAL).to_i.should eq(10)
+      {% begin %}
+        {%
+          data = [{1, 2}, {3, 4}]
+          value = 0
+          data.each do |(k, v)|
+            value += k
+            value += v
+          end
+        %}
+        {{ value }}
+      {% end %}
+      CRYSTAL
+  end
+
+  it "accepts compile-time flags" do
+    run("{{ flag?(:foo) ? 1 : 0 }}", flags: %w(foo)).to_i.should eq(1)
+    run("{{ flag?(:foo) ? 1 : 0 }}", Int32, flags: %w(foo)).should eq(1)
   end
 end

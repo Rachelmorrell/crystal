@@ -2,6 +2,8 @@ require "./ip_socket"
 
 # A Transmission Control Protocol (TCP/IP) socket.
 #
+# NOTE: To use `TCPSocket`, you must explicitly import it with `require "socket"`
+#
 # Usage example:
 # ```
 # require "socket"
@@ -12,46 +14,65 @@ require "./ip_socket"
 # client.close
 # ```
 class TCPSocket < IPSocket
-  # Creates a new `TCPSocket`, waiting to be connected.
-  def self.new(family : Family = Family::INET)
-    super(family, Type::STREAM, Protocol::TCP)
-  end
+  {% begin %}
+    # Creates a new `TCPSocket`, waiting to be connected.
+    def self.new(family : Family = Family::INET, {% if compare_versions(Crystal::VERSION, "1.5.0") >= 0 %} @[Deprecated("Use Socket.set_blocking instead.")] {% end %} blocking = nil)
+      super(af: family, type: Type::STREAM, protocol: Protocol::TCP, blocking: blocking)
+    end
+  {% end %}
 
-  # Creates a new TCP connection to a remote TCP server.
-  #
-  # You may limit the DNS resolution time with `dns_timeout` and limit the
-  # connection time to the remote server with `connect_timeout`. Both values
-  # must be in seconds (integers or floats).
-  #
-  # Note that `dns_timeout` is currently ignored.
-  def initialize(host, port, dns_timeout = nil, connect_timeout = nil)
-    Addrinfo.tcp(host, port, timeout: dns_timeout) do |addrinfo|
-      super(addrinfo.family, addrinfo.type, addrinfo.protocol)
-      connect(addrinfo, timeout: connect_timeout) do |error|
-        close
-        error
+  {% begin %}
+    # Creates a new TCP connection to a remote TCP server.
+    #
+    # You may limit the DNS resolution time with `dns_timeout` and limit the
+    # connection time to the remote server with `connect_timeout`. Both values
+    # should be `Time::Span`.
+    def initialize(host : String, port, dns_timeout : Time::Span? = nil, connect_timeout = nil, {% if compare_versions(Crystal::VERSION, "1.5.0") >= 0 %} @[Deprecated("Use Socket.set_blocking instead.")] {% end %} blocking = nil)
+      Addrinfo.tcp(host, port, timeout: dns_timeout) do |addrinfo|
+        super(af: addrinfo.family, type: addrinfo.type, protocol: addrinfo.protocol, blocking: blocking)
+        connect(addrinfo, timeout: connect_timeout) do |error|
+          close
+          error
+        end
       end
     end
+  {% end %}
+
+  # :ditto:
+  @[Deprecated("Use `.new(String, _, Time::Span?)` instead.")]
+  def initialize(host : String, port, dns_timeout : Number, connect_timeout = nil, blocking = nil)
+    initialize(host, port, dns_timeout.seconds, connect_timeout, blocking: blocking)
   end
 
-  protected def initialize(family : Family, type : Type, protocol : Protocol)
+  protected def initialize(family : Family, type : Type, protocol : Protocol = Protocol::IP)
     super family, type, protocol
   end
 
-  protected def initialize(fd : Int32, family : Family, type : Type, protocol : Protocol)
-    super fd, family, type, protocol
+  # Internal constructor for `TCPServer#accept?`.
+  # The *blocking* arg is purely informational.
+  protected def initialize(*, handle, family, type, protocol, blocking)
+    super(handle: handle, family: family, type: type, protocol: protocol, blocking: blocking)
   end
 
-  # Creates a TCPSocket from an already configured raw file descriptor
-  def initialize(*, fd : Int32, family : Family = Family::INET)
-    super fd, family, Type::STREAM, Protocol::TCP
-  end
+  {% begin %}
+    # Creates an UNIXSocket from an existing system file descriptor or socket
+    # handle.
+    #
+    # This adopts *fd* into the IO system that will reconfigure it as per the
+    # event loop runtime requirements.
+    #
+    # NOTE: On Windows, the handle must have been created with
+    # `WSA_FLAG_OVERLAPPED`.
+    def initialize(*, fd : Handle, family : Family = Family::INET, {% if compare_versions(Crystal::VERSION, "1.5.0") >= 0 %} @[Deprecated("Use Socket.set_blocking instead.")] {% end %} blocking = nil)
+      super fd, family, Type::STREAM, Protocol::TCP, blocking
+    end
+  {% end %}
 
   # Opens a TCP socket to a remote TCP server, yields it to the block, then
   # eventually closes the socket when the block returns.
   #
   # Returns the value of the block.
-  def self.open(host, port)
+  def self.open(host : String, port, &)
     sock = new(host, port)
     begin
       yield sock
@@ -61,7 +82,7 @@ class TCPSocket < IPSocket
   end
 
   # Returns `true` if the Nagle algorithm is disabled.
-  def tcp_nodelay?
+  def tcp_nodelay? : Bool
     getsockopt_bool LibC::TCP_NODELAY, level: Protocol::TCP
   end
 
@@ -70,49 +91,31 @@ class TCPSocket < IPSocket
     setsockopt_bool LibC::TCP_NODELAY, val, level: Protocol::TCP
   end
 
-  {% unless flag?(:openbsd) %}
-    # The amount of time in seconds the connection must be idle before sending keepalive probes.
-    def tcp_keepalive_idle
-      optname = {% if flag?(:darwin) %}
-        LibC::TCP_KEEPALIVE
-      {% elsif flag?(:netbsd) %}
-        LibC::SO_KEEPALIVE
-      {% else %}
-        LibC::TCP_KEEPIDLE
-      {% end %}
-      getsockopt optname, 0, level: Protocol::TCP
-    end
+  # The amount of time in seconds the connection must be idle before sending keepalive probes.
+  def tcp_keepalive_idle
+    system_tcp_keepalive_idle
+  end
 
-    def tcp_keepalive_idle=(val : Int)
-      optname = {% if flag?(:darwin) %}
-        LibC::TCP_KEEPALIVE
-      {% elsif flag?(:netbsd) %}
-        LibC::SO_KEEPALIVE
-      {% else %}
-        LibC::TCP_KEEPIDLE
-      {% end %}
-      setsockopt optname, val, level: Protocol::TCP
-      val
-    end
+  def tcp_keepalive_idle=(val : Int)
+    self.system_tcp_keepalive_idle = val
+  end
 
-    # The amount of time in seconds between keepalive probes.
-    def tcp_keepalive_interval
-      getsockopt LibC::TCP_KEEPINTVL, 0, level: Protocol::TCP
-    end
+  # The amount of time in seconds between keepalive probes.
+  def tcp_keepalive_interval
+    system_tcp_keepalive_interval
+  end
 
-    def tcp_keepalive_interval=(val : Int)
-      setsockopt LibC::TCP_KEEPINTVL, val, level: Protocol::TCP
-      val
-    end
+  def tcp_keepalive_interval=(val : Int)
+    self.system_tcp_keepalive_interval = val
+    val
+  end
 
-    # The number of probes sent, without response before dropping the connection.
-    def tcp_keepalive_count
-      getsockopt LibC::TCP_KEEPCNT, 0, level: Protocol::TCP
-    end
+  # The number of probes sent, without response before dropping the connection.
+  def tcp_keepalive_count
+    system_tcp_keepalive_count
+  end
 
-    def tcp_keepalive_count=(val : Int)
-      setsockopt LibC::TCP_KEEPCNT, val, level: Protocol::TCP
-      val
-    end
-  {% end %}
+  def tcp_keepalive_count=(val : Int)
+    self.system_tcp_keepalive_count = val
+  end
 end

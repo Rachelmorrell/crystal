@@ -3,7 +3,7 @@
 #
 # ```
 # # A proc without arguments
-# ->{ 1 } # Proc(Int32)
+# -> { 1 } # Proc(Int32)
 #
 # # A proc with one argument
 # ->(x : Int32) { x.to_s } # Proc(Int32, String)
@@ -11,6 +11,8 @@
 # # A proc with two arguments:
 # ->(x : Int32, y : Int32) { x + y } # Proc(Int32, Int32, Int32)
 # ```
+#
+# See [`Proc` literals](https://crystal-lang.org/reference/syntax_and_semantics/literals/proc.html) in the language reference.
 #
 # The types of the arguments (`T`) are mandatory, except when directly
 # sending a proc literal to a lib fun in C bindings.
@@ -67,7 +69,7 @@
 # ```
 # module Ticker
 #   # The callback for the user doesn't have a Void*
-#   @@box : Pointer(Void)?
+#   @@box = Pointer(Void).null
 #
 #   def self.on_tick(&callback : Int32 ->)
 #     # Since Proc is a {Void*, Void*}, we can't turn that into a Void*, so we
@@ -98,7 +100,8 @@
 # The C library will of course store the callback, but Crystal's GC has
 # no way of knowing that.
 struct Proc
-  def self.new(pointer : Void*, closure_data : Void*)
+  {% if flag?(:interpreted) %} @[Primitive(:interpreter_proc_new)] {% end %}
+  def self.new(pointer : Void*, closure_data : Void*) : self
     func = {pointer, closure_data}
     ptr = pointerof(func).as(self*)
     ptr.value
@@ -168,15 +171,15 @@ struct Proc
     {{T.size}}
   end
 
-  def pointer
+  def pointer : Void*
     internal_representation[0]
   end
 
-  def closure_data
+  def closure_data : Void*
     internal_representation[1]
   end
 
-  def closure?
+  def closure? : Bool
     !closure_data.null?
   end
 
@@ -217,5 +220,17 @@ struct Proc
     end
     io << '>'
     nil
+  end
+
+  # Invokes this `Proc` and returns the result.
+  #
+  # ```
+  # add = ->(x : Int32, y : Int32) { x + y }
+  # add[1, 2] # => 3
+  # ```
+  #
+  # Same as `#call`.
+  def [](*args : *T) : R
+    call(*args)
   end
 end

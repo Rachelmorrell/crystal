@@ -1,3 +1,20 @@
+{%
+  min_compiler_version = "1.15.0"
+  if compare_versions(Crystal::VERSION, min_compiler_version) < 0
+    @top_level.warning <<-TXT
+      This compiler release at version #{Crystal::VERSION.id} is no longer supported.
+      Please upgrade to at least Crystal #{min_compiler_version.id}.
+
+      Learn about the forward compatibility policy at https://crystal-lang.org/reference/project/release-policy.html#forward-compatibility
+      TXT
+  end
+%}
+
+{% if flag?(:interpreted) %}
+  # The interpreter doesn't call `main`
+  Crystal.init_runtime
+{% end %}
+
 # Entries to this file should only be ordered if macros are involved -
 # macros need to be defined before they are used.
 # A first compiler pass gathers all classes and methods, removing the
@@ -8,14 +25,11 @@
 # appear in the API docs.
 
 # This list requires ordered statements
-require "crystal/once"
 require "lib_c"
 require "macros"
 require "object"
+require "crystal/once"
 require "comparable"
-{% if flag?(:win32) %}
-  require "windows_stubs"
-{% end %}
 require "exception"
 require "iterable"
 require "iterator"
@@ -23,11 +37,13 @@ require "steppable"
 require "indexable"
 require "string"
 require "number"
+require "primitives"
 
 # Alpha-sorted list
 require "annotations"
 require "array"
 require "atomic"
+require "base64"
 require "bool"
 require "box"
 require "char"
@@ -42,6 +58,8 @@ require "enum"
 require "enumerable"
 require "env"
 require "errno"
+require "winerror"
+require "wasi_error"
 require "file"
 require "float"
 require "gc"
@@ -51,27 +69,23 @@ require "intrinsics"
 require "io"
 require "kernel"
 require "math/math"
-{% unless flag?(:win32) %}
-  require "mutex"
-{% end %}
+require "mutex"
 require "named_tuple"
 require "nil"
 require "humanize"
 require "path"
 require "pointer"
 require "pretty_print"
-require "primitives"
 require "proc"
 require "process"
 require "raise"
 require "random"
 require "range"
 require "reference"
+require "reference_storage"
 require "regex"
 require "set"
-{% unless flag?(:win32) %}
-  require "signal"
-{% end %}
+require "signal"
 require "slice"
 require "static_array"
 require "struct"

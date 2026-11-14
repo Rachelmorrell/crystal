@@ -3,52 +3,37 @@ require "openssl"
 require "../../../support/finalize"
 
 class OpenSSL::SSL::Context
-  property key : Symbol?
-
-  def finalize
-    if key = self.key
-      State.inc(key)
-    end
-
-    previous_def
-  end
+  include FinalizeCounter
 end
 
 describe OpenSSL::SSL::Context do
   it "new for client" do
     context = OpenSSL::SSL::Context::Client.new
 
-    (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL)
-    (context.options & OpenSSL::SSL::Options::NO_SSL_V2).should eq(OpenSSL::SSL::Options::NO_SSL_V2)
-    (context.options & OpenSSL::SSL::Options::NO_SSL_V3).should eq(OpenSSL::SSL::Options::NO_SSL_V3)
+    {% if OpenSSL.has_constant?(:KTLS) %}
+      (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL & ~OpenSSL::SSL::Options::ENABLE_KTLS)
+    {% else %}
+      (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL)
+    {% end %}
     (context.options & OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION).should eq(OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION)
-    (context.options & OpenSSL::SSL::Options::SINGLE_ECDH_USE).should eq(OpenSSL::SSL::Options::SINGLE_ECDH_USE)
-    (context.options & OpenSSL::SSL::Options::SINGLE_DH_USE).should eq(OpenSSL::SSL::Options::SINGLE_DH_USE)
 
     context.modes.should eq(OpenSSL::SSL::Modes.flags(AUTO_RETRY, RELEASE_BUFFERS))
     context.verify_mode.should eq(OpenSSL::SSL::VerifyMode::PEER)
-
-    OpenSSL::SSL::Context::Client.new(LibSSL.tlsv1_method)
   end
 
   it "new for server" do
     context = OpenSSL::SSL::Context::Server.new
 
-    (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL)
-    (context.options & OpenSSL::SSL::Options::NO_SSL_V2).should eq(OpenSSL::SSL::Options::NO_SSL_V2)
-    (context.options & OpenSSL::SSL::Options::NO_SSL_V3).should eq(OpenSSL::SSL::Options::NO_SSL_V3)
-    (context.options & OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION).should eq(OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION)
-    (context.options & OpenSSL::SSL::Options::SINGLE_ECDH_USE).should eq(OpenSSL::SSL::Options::SINGLE_ECDH_USE)
-    (context.options & OpenSSL::SSL::Options::SINGLE_DH_USE).should eq(OpenSSL::SSL::Options::SINGLE_DH_USE)
-    (context.options & OpenSSL::SSL::Options::CIPHER_SERVER_PREFERENCE).should eq(OpenSSL::SSL::Options::CIPHER_SERVER_PREFERENCE)
-    {% if compare_versions(LibSSL::OPENSSL_VERSION, "1.1.0") >= 0 %}
-      (context.options & OpenSSL::SSL::Options::NO_RENEGOTIATION).should eq(OpenSSL::SSL::Options::NO_RENEGOTIATION)
+    {% if OpenSSL.has_constant?(:KTLS) %}
+      (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL & ~OpenSSL::SSL::Options::ENABLE_KTLS)
+    {% else %}
+      (context.options & OpenSSL::SSL::Options::ALL).should eq(OpenSSL::SSL::Options::ALL)
     {% end %}
+    (context.options & OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION).should eq(OpenSSL::SSL::Options::NO_SESSION_RESUMPTION_ON_RENEGOTIATION)
+    (context.options & OpenSSL::SSL::Options::NO_RENEGOTIATION).should eq(OpenSSL::SSL::Options::NO_RENEGOTIATION)
 
     context.modes.should eq(OpenSSL::SSL::Modes.flags(AUTO_RETRY, RELEASE_BUFFERS))
     context.verify_mode.should eq(OpenSSL::SSL::VerifyMode::NONE)
-
-    OpenSSL::SSL::Context::Server.new(LibSSL.tlsv1_method)
   end
 
   it "insecure for client" do
@@ -56,13 +41,7 @@ describe OpenSSL::SSL::Context do
     context.should be_a(OpenSSL::SSL::Context::Client)
     context.verify_mode.should eq(OpenSSL::SSL::VerifyMode::NONE)
     context.options.no_ssl_v3?.should_not be_true
-    {% if compare_versions(LibSSL::OPENSSL_VERSION, "1.1.1") >= 0 %}
-      context.modes.should eq(OpenSSL::SSL::Modes::AUTO_RETRY)
-    {% else %}
-      context.modes.should eq(OpenSSL::SSL::Modes::None)
-    {% end %}
-
-    OpenSSL::SSL::Context::Client.insecure(LibSSL.tlsv1_method)
+    context.modes.should eq(OpenSSL::SSL::Modes::AUTO_RETRY)
   end
 
   it "insecure for server" do
@@ -70,13 +49,7 @@ describe OpenSSL::SSL::Context do
     context.should be_a(OpenSSL::SSL::Context::Server)
     context.verify_mode.should eq(OpenSSL::SSL::VerifyMode::NONE)
     context.options.no_ssl_v3?.should_not be_true
-    {% if compare_versions(LibSSL::OPENSSL_VERSION, "1.1.1") >= 0 %}
-      context.modes.should eq(OpenSSL::SSL::Modes::AUTO_RETRY)
-    {% else %}
-      context.modes.should eq(OpenSSL::SSL::Modes::None)
-    {% end %}
-
-    OpenSSL::SSL::Context::Server.insecure(LibSSL.tlsv1_method)
+    context.modes.should eq(OpenSSL::SSL::Modes::AUTO_RETRY)
   end
 
   it "sets certificate chain" do
@@ -137,7 +110,12 @@ describe OpenSSL::SSL::Context do
     context = OpenSSL::SSL::Context::Client.new
     level = context.security_level
     context.security_level = level + 1
-    context.security_level.should eq(level + 1)
+
+    if LibSSL.responds_to?(:ssl_ctx_set_security_level)
+      context.security_level.should eq(level + 1)
+    else
+      context.security_level.should eq 0
+    end
   end
 
   it "adds temporary ecdh curve (P-256)" do
@@ -198,19 +176,37 @@ describe OpenSSL::SSL::Context do
     context.verify_mode.should eq(OpenSSL::SSL::VerifyMode::PEER)
   end
 
-  {% if compare_versions(LibSSL::OPENSSL_VERSION, "1.0.2") >= 0 %}
+  if LibSSL.responds_to?(:ssl_ctx_set_alpn_protos)
     it "alpn_protocol=" do
       context = OpenSSL::SSL::Context::Client.insecure
       context.alpn_protocol = "h2"
     end
-  {% end %}
+  end
+
+  it "on_server_name" do
+    context = OpenSSL::SSL::Context::Server.new
+    context.certificate_chain = datapath("openssl", "openssl.crt")
+    context.private_key = datapath("openssl", "openssl.key")
+
+    alt_context = OpenSSL::SSL::Context::Server.new
+    alt_context.certificate_chain = datapath("openssl", "openssl.crt")
+    alt_context.private_key = datapath("openssl", "openssl.key")
+
+    context.on_server_name do |hostname|
+      if hostname == "alt.example.com"
+        alt_context
+      else
+        nil
+      end
+    end
+  end
 
   it "calls #finalize on insecure client context" do
-    assert_finalizes(:insecure_client_ctx) { OpenSSL::SSL::Context::Client.insecure }
+    assert_finalizes("insecure_client_ctx") { OpenSSL::SSL::Context::Client.insecure }
   end
 
   it "calls #finalize on insecure server context" do
-    assert_finalizes(:insecure_server_ctx) { OpenSSL::SSL::Context::Server.insecure }
+    assert_finalizes("insecure_server_ctx") { OpenSSL::SSL::Context::Server.insecure }
   end
 
   describe ".from_hash" do
@@ -239,13 +235,13 @@ describe OpenSSL::SSL::Context do
       expect_raises(ArgumentError, "missing private key") do
         OpenSSL::SSL::Context::Client.from_hash({} of String => String)
       end
-      expect_raises(OpenSSL::Error, "SSL_CTX_use_PrivateKey_file: error:02001002:system library:fopen:No such file or directory") do
+      expect_raises(OpenSSL::Error, /SSL_CTX_use_PrivateKey_file: error:.*:No such file or directory/) do
         OpenSSL::SSL::Context::Client.from_hash({"key" => nonexistent})
       end
       expect_raises(ArgumentError, "missing certificate") do
         OpenSSL::SSL::Context::Client.from_hash({"key" => private_key})
       end
-      expect_raises(OpenSSL::Error, "SSL_CTX_use_certificate_chain_file: error:02001002:system library:fopen:No such file or directory") do
+      expect_raises(OpenSSL::Error, /SSL_CTX_use_certificate_chain_file: error:.*:No such file or directory/) do
         OpenSSL::SSL::Context::Client.from_hash({"key" => private_key, "cert" => nonexistent})
       end
       expect_raises(ArgumentError, "Invalid SSL context: missing CA certificate") do
@@ -257,9 +253,15 @@ describe OpenSSL::SSL::Context do
       expect_raises(ArgumentError, "Invalid SSL context: missing CA certificate") do
         OpenSSL::SSL::Context::Client.from_hash({"key" => private_key, "cert" => certificate, "verify_mode" => "peer"})
       end
-      expect_raises(OpenSSL::Error, "SSL_CTX_load_verify_locations: error:02001002:system library:fopen:No such file or directory") do
+      expect_raises(OpenSSL::Error, /SSL_CTX_load_verify_locations: error:.*:No such file or directory/) do
         OpenSSL::SSL::Context::Client.from_hash({"key" => private_key, "cert" => certificate, "ca" => nonexistent})
       end
+    end
+  end
+
+  describe OpenSSL::SSL::VerifyMode do
+    it ".parse none (#7455)" do
+      OpenSSL::SSL::VerifyMode.parse("none").should eq OpenSSL::SSL::VerifyMode::NONE
     end
   end
 end

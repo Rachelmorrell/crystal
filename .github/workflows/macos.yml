@@ -2,22 +2,43 @@ name: macOS CI
 
 on: [push, pull_request]
 
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 env:
   SPEC_SPLIT_DOTS: 160
   CI_NIX_SHELL: true
 
 jobs:
-  test_macos:
-    runs-on: macos-latest
+  darwin-test:
+    runs-on: ${{ matrix.runs-on }}
+    name: "${{ matrix.runs-on }} (${{ matrix.arch }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runs-on: macos-26-intel
+          arch: x86_64-darwin
+        - runs-on: macos-26
+          arch: aarch64-darwin
     steps:
       - name: Download Crystal source
-        uses: actions/checkout@v2
-
-      - uses: cachix/install-nix-action@v12
-      - uses: cachix/cachix-action@v8
+        uses: actions/checkout@v7
         with:
-          name: crystal-ci
-          signingKey: '${{ secrets.CACHIX_SIGNING_KEY }}'
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: crystal-lang-ci
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
       - name: Prepare System
         run: bin/ci prepare_system
@@ -27,3 +48,39 @@ jobs:
 
       - name: Test
         run: bin/ci build
+
+      - name: Test interpreter
+        run: bin/ci with_build_env 'make interpreter_spec'
+
+  test-std:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        opts:
+          - flags: "-Dwithout_mt"
+          - workers: 4 # execution_context: parallel
+    steps:
+      - name: Download Crystal source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command
+
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: crystal-lang-ci
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Prepare System
+        run: bin/ci prepare_system
+
+      - name: Prepare Build
+        run: bin/ci prepare_build
+
+      - name: Test
+        run: bin/ci with_build_env 'CRYSTAL_WORKERS=${{ matrix.opts.workers || 1 }} make std_spec threads=1 FLAGS="${{ matrix.opts.flags || '' }}"'

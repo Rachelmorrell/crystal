@@ -1,4 +1,5 @@
 require "spec"
+require "spec/helpers/iterate"
 require "iterator"
 
 struct StructIter
@@ -17,7 +18,28 @@ struct StructIter
   end
 end
 
+private class MockIterator
+  include Iterator(Int32)
+
+  def initialize
+    @x = 0
+    @y = Slice(Int32).new(5)
+  end
+
+  def next
+    return stop if @x >= 3
+    @x += 1
+  end
+end
+
 describe Iterator do
+  describe "Iterator.empty" do
+    it "creates empty iterator" do
+      iter = Iterator(String).empty
+      iter.next.should be_a(Iterator::Stop)
+    end
+  end
+
   describe "Iterator.of" do
     it "creates singleton" do
       iter = Iterator.of(42)
@@ -44,16 +66,118 @@ describe Iterator do
     end
   end
 
+  describe "#accumulate" do
+    context "prefix sums" do
+      it "returns prefix sums" do
+        iter = (1..4).each.accumulate
+        iter.next.should eq(1)
+        iter.next.should eq(3)
+        iter.next.should eq(6)
+        iter.next.should eq(10)
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "empty iterator stops immediately" do
+        (1..0).each.accumulate.next.should be_a(Iterator::Stop)
+      end
+    end
+
+    context "prefix sums, with init" do
+      it "returns prefix sums" do
+        iter = (1..4).each.accumulate(5)
+        iter.next.should eq(5)
+        iter.next.should eq(6)
+        iter.next.should eq(8)
+        iter.next.should eq(11)
+        iter.next.should eq(15)
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "preserves initial type" do
+        iter = {'a', 'b', 'c'}.each.accumulate("def")
+        iter.next.should eq("def")
+        iter.next.should eq("defa")
+        iter.next.should eq("defab")
+        iter.next.should eq("defabc")
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "empty iterator returns only initial value" do
+        iter = (1..0).each.accumulate(7)
+        iter.next.should eq(7)
+        iter.next.should be_a(Iterator::Stop)
+      end
+    end
+
+    context "generic cumulative fold" do
+      it "accumulates values" do
+        iter = (4..7).each.accumulate { |x, y| x * 10 + y }
+        iter.next.should eq(4)
+        iter.next.should eq(45)
+        iter.next.should eq(456)
+        iter.next.should eq(4567)
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "empty iterator stops immediately" do
+        (1..0).each.accumulate { raise "" }.next.should be_a(Iterator::Stop)
+      end
+
+      it "works with empty iterator" do
+        iter = Iterator(Int32).empty.accumulate { |x, y| x * 10 + y }
+        iter.next.should be_a(Iterator::Stop)
+      end
+    end
+
+    context "generic cumulative fold, with init" do
+      it "accumulates values" do
+        iter = (4..7).each.accumulate(8) { |x, y| x * 10 + y }
+        iter.next.should eq(8)
+        iter.next.should eq(84)
+        iter.next.should eq(845)
+        iter.next.should eq(8456)
+        iter.next.should eq(84567)
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "preserves initial type" do
+        iter = {4, 3, 2}.each.accumulate("X") { |x, y| x * y }
+        iter.next.should eq("X")
+        iter.next.should eq("XXXX")
+        iter.next.should eq("XXXXXXXXXXXX")
+        iter.next.should eq("XXXXXXXXXXXXXXXXXXXXXXXX")
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "empty iterator returns only initial value" do
+        iter = (1..0).each.accumulate(7) { raise "" }
+        iter.next.should eq(7)
+        iter.next.should be_a(Iterator::Stop)
+      end
+
+      it "works with empty iterator" do
+        iter = Iterator(Int32).empty.accumulate(7) { |x, y| x * y }
+        iter.next.should eq(7)
+        iter.next.should be_a(Iterator::Stop)
+      end
+    end
+  end
+
   describe "compact_map" do
     it "applies the function and removes nil values" do
-      iter = (1..3).each.compact_map { |e| e.odd? ? e : nil }
-      iter.next.should eq(1)
-      iter.next.should eq(3)
-      iter.next.should be_a(Iterator::Stop)
+      assert_iterates_iterator [1, 3], (1..3).each.compact_map { |e| e.odd? ? e : nil }
     end
 
     it "sums after compact_map to_a" do
       (1..3).each.compact_map { |e| e.odd? ? e : nil }.to_a.sum.should eq(4)
+    end
+
+    it "works with empty iterator (#16922)" do
+      assert_iterates_iterator ([] of Int32), Iterator(Int32).empty.compact_map { |e| e.odd? ? e : nil }
+    end
+
+    it "works with non-nilable block output" do
+      assert_iterates_iterator ["1", "2", "3"], (1..3).each.compact_map(&.to_s)
     end
   end
 
@@ -65,6 +189,11 @@ describe Iterator do
       iter.next.should eq('a')
       iter.next.should eq('b')
       iter.next.should be_a(Iterator::Stop)
+    end
+
+    # NOTE: This spec would only fail in release mode.
+    it "does not experience tuple upcase bug of #13411" do
+      [{true}].each.chain([{1}].each).first(3).to_a.should eq [{true}, {1}]
     end
 
     describe "chain indeterminate number of iterators" do
@@ -108,6 +237,12 @@ describe Iterator do
         iter.next.should eq 4.0_f64
         iter.next.should be_a Iterator::Stop
       end
+    end
+  end
+
+  describe ".chain" do
+    it "works with empty array" do
+      assert_iterates_iterator ([] of Iterator(Int32)), Iterator.chain [Iterator(Int32).empty]
     end
   end
 
@@ -212,7 +347,7 @@ describe Iterator do
     it "cycles an empty array" do
       ary = [] of Int32
       values = ary.each.cycle.to_a
-      values.empty?.should be_true
+      values.should be_empty
     end
 
     it "cycles N times" do
@@ -341,6 +476,10 @@ describe Iterator do
       iter.next.should eq(6)
       iter.next.should be_a(Iterator::Stop)
     end
+
+    it "works with empty iterator" do
+      assert_iterates_iterator ([] of Int32), Iterator(Int32).empty.map { |e| e * 2 }
+    end
   end
 
   describe "reject" do
@@ -361,6 +500,14 @@ describe Iterator do
       ary = [1, false, 3, true].each.reject(Bool).to_a
       ary.should eq([1, 3])
       ary.should be_a(Array(Int32))
+    end
+
+    it "works with empty iterator" do
+      assert_iterates_iterator ([] of Int32), Iterator(Int32).empty.reject { |e| e >= 2 }
+    end
+
+    it "works with empty iterator" do
+      assert_iterates_iterator ([] of Int32), Iterator(Int32 | UInt8).empty.reject(UInt8)
     end
   end
 
@@ -442,6 +589,10 @@ describe Iterator do
       iter.next.should eq([4, 5, 6])
       iter.next.should eq([7, 8])
       iter.next.should be_a(Iterator::Stop)
+    end
+
+    it "doesnt conflict with `::Slice` type" do
+      assert_iterates_iterator [1, 2, 3], MockIterator.new.each
     end
   end
 
@@ -549,7 +700,7 @@ describe Iterator do
 
   describe "uniq" do
     it "without block" do
-      iter = (1..8).each.map { |x| x % 3 }.uniq
+      iter = (1..8).each.map { |x| x % 3 }.uniq # ameba:disable Performance/ChainedCallWithNoBang
       iter.next.should eq(1)
       iter.next.should eq(2)
       iter.next.should eq(0)
@@ -565,38 +716,10 @@ describe Iterator do
     end
   end
 
-  describe "with_index" do
-    it "does with_index from range" do
-      iter = (1..3).each.with_index
-      iter.next.should eq({1, 0})
-      iter.next.should eq({2, 1})
-      iter.next.should eq({3, 2})
-      iter.next.should be_a(Iterator::Stop)
-    end
-
-    it "does with_index with offset from range" do
-      iter = (1..3).each.with_index(10)
-      iter.next.should eq({1, 10})
-      iter.next.should eq({2, 11})
-      iter.next.should eq({3, 12})
-      iter.next.should be_a(Iterator::Stop)
-    end
-
-    it "does with_index from range, with block" do
-      tuples = [] of {Int32, Int32}
-      (1..3).each.with_index do |value, index|
-        tuples << {value, index}
-      end
-      tuples.should eq([{1, 0}, {2, 1}, {3, 2}])
-    end
-
-    it "does with_index from range, with block with offset" do
-      tuples = [] of {Int32, Int32}
-      (1..3).each.with_index(10) do |value, index|
-        tuples << {value, index}
-      end
-      tuples.should eq([{1, 10}, {2, 11}, {3, 12}])
-    end
+  describe "#with_index" do
+    it_iterates "with default offset", [{1, 0}, {2, 1}, {3, 2}], (1..3).each.with_index, tuple: true
+    it_iterates "with explicit offset", [{1, 10}, {2, 11}, {3, 12}], (1..3).each.with_index(10), tuple: true
+    it_iterates "with non-Int32 offset", [{1, Int64::MIN}, {2, Int64::MIN + 1}, {3, Int64::MIN + 2}], (1..3).each.with_index(Int64::MIN), tuple: true
   end
 
   describe "with object" do
@@ -639,6 +762,12 @@ describe Iterator do
       iter.next.should eq({3, 'c', "W"})
       iter.next.should be_a(Iterator::Stop)
     end
+
+    it "works with empty iterators" do
+      r1 = (1..3).each
+      r2 = Iterator(Int32).empty
+      assert_iterates_iterator ([] of {Int32, Int32}), r1.zip(r2)
+    end
   end
 
   describe "integration" do
@@ -654,13 +783,13 @@ describe Iterator do
 
   describe "flatten" do
     it "flattens an iterator of mixed-type iterators" do
-      iter = [(1..2).each, ('a'..'b').each, {:c => 3}.each].each.flatten
+      iter = [(1..2).each, ('a'..'b').each, {"c" => 3}.each].each.flatten
 
       iter.next.should eq(1)
       iter.next.should eq(2)
       iter.next.should eq('a')
       iter.next.should eq('b')
-      iter.next.should eq({:c, 3})
+      iter.next.should eq({"c", 3})
 
       iter.next.should be_a(Iterator::Stop)
     end
@@ -720,7 +849,7 @@ describe Iterator do
     end
 
     it "flattens nested struct iterators with internal state being value types" do
-      iter = (1..2).each.map { |i| StructIter.new(10 * i + 1, 10 * i + 3) }.flatten
+      iter = (1..2).each.map { |i| StructIter.new(10 * i + 1, 10 * i + 3) }.flatten # ameba:disable Performance/FlattenAfterMap
 
       iter.next.should eq(11)
       iter.next.should eq(12)
@@ -735,6 +864,10 @@ describe Iterator do
       iter = [1, [2, 3], 4].each.flatten
 
       iter.to_a.should eq([1, 2, 3, 4])
+    end
+
+    it "works with empty iterator" do
+      assert_iterates_iterator ([] of Int32), Iterator(Array(Array(Int32))).empty.flatten
     end
   end
 
@@ -804,6 +937,10 @@ describe Iterator do
         end
       end
       iter.to_a.should eq([1, 'a', 'a', "", ""])
+    end
+
+    it "works with empty iterator" do
+      assert_iterates_iterator ([] of String), Iterator(Array(Array(Int32))).empty.flat_map(&.to_s)
     end
   end
 

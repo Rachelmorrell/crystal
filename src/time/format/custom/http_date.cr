@@ -10,10 +10,10 @@ struct Time::Format
   # * [asctime](http://en.cppreference.com/w/c/chrono/asctime)
   #
   # ```
-  # Time::Format::HTTP_DATE.parse("Sun, 14 Feb 2016 21:00:00 GMT")  # => 2016-02-14 21:00:00 UTC
-  # Time::Format::HTTP_DATE.parse("Sunday, 14-Feb-16 21:00:00 GMT") # => 2016-02-14 21:00:00 UTC
-  # Time::Format::HTTP_DATE.parse("Sun, 14-Feb-2016 21:00:00 GMT")  # => 2016-02-14 21:00:00 UTC
-  # Time::Format::HTTP_DATE.parse("Sun Feb 14 21:00:00 2016")       # => 2016-02-14 21:00:00 UTC
+  # Time::Format::HTTP_DATE.parse("Sun, 14 Feb 2016 21:00:00 GMT")  # => 2016-02-14 21:00:00Z
+  # Time::Format::HTTP_DATE.parse("Sunday, 14-Feb-16 21:00:00 GMT") # => 2016-02-14 21:00:00Z
+  # Time::Format::HTTP_DATE.parse("Sun, 14-Feb-2016 21:00:00 GMT")  # => 2016-02-14 21:00:00Z
+  # Time::Format::HTTP_DATE.parse("Sun Feb 14 21:00:00 2016")       # => 2016-02-14 21:00:00Z
   #
   # Time::Format::HTTP_DATE.format(Time.utc(2016, 2, 15)) # => "Mon, 15 Feb 2016 00:00:00 GMT"
   # ```
@@ -37,7 +37,7 @@ struct Time::Format
     # Formats a `Time` into a `String`.
     #
     # *time* is always converted to UTC.
-    def self.format(time : Time)
+    def self.format(time : Time) : String
       String.build do |io|
         format(time, io)
       end
@@ -45,7 +45,7 @@ struct Time::Format
   end
 
   struct Parser
-    def http_date
+    def http_date : Time::Location
       ansi_c_format = http_date_short_day_name_with_comma?
 
       if ansi_c_format
@@ -74,7 +74,7 @@ struct Time::Format
       time_zone_gmt_or_rfc2822
     end
 
-    def http_date_ansi_c
+    def http_date_ansi_c : Time::Location
       short_month_name
       whitespace
       day_of_month_blank_padded
@@ -94,14 +94,15 @@ struct Time::Format
       !ansi_c_format && current_char.ascii_whitespace?
     end
 
-    def http_date_short_day_name_with_comma?
-      return unless current_char.ascii_letter?
+    def http_date_short_day_name_with_comma? : Bool
+      return false unless current_char.ascii_letter?
 
       short_day_name
 
       ansi_c_format = current_char != ','
       next_char unless ansi_c_format
 
+      raise "Invalid date format" unless current_char.ascii_whitespace?
       whitespace
 
       ansi_c_format

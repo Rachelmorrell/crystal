@@ -167,7 +167,7 @@ class RedBlackTree
     y
   end
 
-  def inorder_walk(x = root)
+  def inorder_walk(&)
     x = self.minimum
     while !x.nil_node?
       yield x.key
@@ -175,11 +175,11 @@ class RedBlackTree
     end
   end
 
-  def each(x = root)
+  def each(x = root, &)
     inorder_walk(x) { |k| yield k }
   end
 
-  def reverse_inorder_walk(x = root)
+  def reverse_inorder_walk(&)
     x = self.maximum
     while !x.nil_node?
       yield x.key
@@ -187,7 +187,7 @@ class RedBlackTree
     end
   end
 
-  def reverse_each(x = root)
+  def reverse_each(x = root, &)
     reverse_inorder_walk(x) { |k| yield k }
   end
 
@@ -328,10 +328,10 @@ class RedBlackTreeRunner
     @n = n
 
     random = Random.new(1234) # repeatable random seq
-    @a1 = Array(Int32).new(n) { rand(99_999) }
+    @a1 = Array(Int32).new(n) { random.rand(99_999) }
 
     random = Random.new(4321) # repeatable random seq
-    @a2 = Array(Int32).new(n) { rand(99_999) }
+    @a2 = Array(Int32).new(n) { random.rand(99_999) }
 
     @tree = RedBlackTree.new
   end
@@ -382,25 +382,26 @@ class RedBlackTreeRunner
   end
 end
 
-def bench(name, n = 1)
-  start = Time.monotonic
+def bench(name, n = 1, &)
   print "#{name}: "
   res = nil
-  n.times do
-    res = yield
+  time = Time.measure do
+    n.times do
+      res = yield
+    end
   end
-
-  puts "#{Time.monotonic - start}, res: #{res}"
+  puts "#{time}, res: #{res}"
 end
 
-start = Time.monotonic
-b = RedBlackTreeRunner.new 100_000
-bench("delete", 10) { b.run_delete }
-bench("add", 10) { b.run_add }
-bench("search", 10) { b.run_search }
-bench("walk", 100) { b.run_inorder_walk }
-bench("reverse_walk", 100) { b.run_reverse_inorder_walk }
-bench("min", 100) { b.run_min }
-bench("max", 100) { b.run_max }
+time = Time.measure do
+  b = RedBlackTreeRunner.new 100_000
+  bench("delete", 10) { b.run_delete }
+  bench("add", 10) { b.run_add }
+  bench("search", 10) { b.run_search }
+  bench("walk", 100) { b.run_inorder_walk }
+  bench("reverse_walk", 100) { b.run_reverse_inorder_walk }
+  bench("min", 100) { b.run_min }
+  bench("max", 100) { b.run_max }
+end
 
-puts "summary time: #{Time.monotonic - start}"
+puts "summary time: #{time}"

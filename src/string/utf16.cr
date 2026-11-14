@@ -12,21 +12,6 @@ class String
   # "hi 𐂥".to_utf16 # => Slice[104_u16, 105_u16, 32_u16, 55296_u16, 56485_u16]
   # ```
   def to_utf16 : Slice(UInt16)
-    if ascii_only?
-      # size == bytesize, so each char fits in one UInt16
-
-      # This is essentially equivalent to `to_slice.map(&.to_u16)` but also makes
-      # sure to allocate a null byte after the string.
-      slice = Slice(UInt16).new(bytesize + 1) do |i|
-        if i == bytesize
-          0_u16
-        else
-          unsafe_byte_at(i).to_u16
-        end
-      end
-      return slice[0, bytesize]
-    end
-
     # size < bytesize, so we need to count the number of characters that are
     # two UInt16 wide.
     u16_size = 0
@@ -37,28 +22,24 @@ class String
     # Allocate one extra character for trailing null
     slice = Slice(UInt16).new(u16_size + 1)
 
-    i = 0
+    appender = slice.to_unsafe.appender
     each_char do |char|
       ord = char.ord
-      if ord <= 0xd800 || (0xe000 <= ord < 0x1_0000)
+      if ord < 0x1_0000
         # One UInt16 is enough
-        slice[i] = ord.to_u16
-      elsif ord >= 0x1_0000
-        # Needs surrogate pair
-        ord -= 0x1_0000
-        slice[i] = 0xd800_u16 + ((ord >> 10) & 0x3ff) # Keep top 10 bits
-        i += 1
-        slice[i] = 0xdc00_u16 + (ord & 0x3ff) # Keep low 10 bits
+        appender << ord.to_u16!
       else
-        # Invalid char: use replacement
-        slice[i] = 0xfffd_u16
+        # Needs surrogate pair
+        ord &-= 0x1_0000
+        appender << 0xd800_u16 &+ ((ord >> 10) & 0x3ff) # Keep top 10 bits
+        appender << 0xdc00_u16 &+ (ord & 0x3ff)         # Keep low 10 bits
       end
-      i += 1
     end
 
     # Append null byte
-    slice[i] = 0_u16
+    appender << 0_u16
 
+    # The trailing null is not part of the returned slice
     slice[0, u16_size]
   end
 
@@ -67,21 +48,27 @@ class String
   # Invalid values are encoded using the unicode replacement char with
   # codepoint `0xfffd`.
   #
+  # If *truncate_at_null* is true, only the characters up to and not including
+  # the first null character are copied.
+  #
   # ```
   # slice = Slice[104_u16, 105_u16, 32_u16, 55296_u16, 56485_u16]
   # String.from_utf16(slice) # => "hi 𐂥"
+  #
+  # slice = UInt16.slice(102, 111, 111, 0, 98, 97, 114)
+  # String.from_utf16(slice, truncate_at_null: true) # => "foo"
   # ```
-  def self.from_utf16(slice : Slice(UInt16)) : String
+  def self.from_utf16(slice : Slice(UInt16), *, truncate_at_null : Bool = false) : String
     bytesize = 0
     size = 0
 
-    each_utf16_char(slice) do |char|
+    each_utf16_char(slice, truncate_at_null: truncate_at_null) do |char|
       bytesize += char.bytesize
       size += 1
     end
 
     String.new(bytesize) do |buffer|
-      each_utf16_char(slice) do |char|
+      each_utf16_char(slice, truncate_at_null: truncate_at_null) do |char|
         char.each_byte do |byte|
           buffer.value = byte
           buffer += 1
@@ -96,10 +83,12 @@ class String
   #
   # ```
   # slice = Slice[104_u16, 105_u16, 0_u16, 55296_u16, 56485_u16, 0_u16]
-  # String.from_utf16(slice) # => "hi\0000𐂥"
+  # String.from_utf16(slice) # => "hi\u0000𐂥\u0000"
   # pointer = slice.to_unsafe
-  # string, pointer = String.from_utf16(pointer) # => "hi"
-  # string, pointer = String.from_utf16(pointer) # => "𐂥"
+  # string, pointer = String.from_utf16(pointer)
+  # string # => "hi"
+  # string, pointer = String.from_utf16(pointer)
+  # string # => "𐂥"
   # ```
   #
   # Invalid values are encoded using the unicode replacement char with
@@ -126,33 +115,36 @@ class String
     {string, pointer + 1}
   end
 
+  # :nodoc:
+  #
   # Yields each decoded char in the given slice.
-  private def self.each_utf16_char(slice : Slice(UInt16))
+  def self.each_utf16_char(slice : Slice(UInt16), *, truncate_at_null : Bool = false, &)
     i = 0
     while i < slice.size
       byte = slice[i].to_i
+      break if truncate_at_null && byte == 0
       if byte < 0xd800 || byte >= 0xe000
         # One byte
         codepoint = byte
-      elsif 0xd800 <= byte < 0xdc00 &&
+      elsif byte < 0xdc00 &&
             (i + 1) < slice.size &&
             0xdc00 <= slice[i + 1] <= 0xdfff
         # Surrogate pair
-        codepoint = ((byte - 0xd800) << 10) + (slice[i + 1] - 0xdc00) + 0x10000
+        codepoint = (byte << 10) &+ slice[i + 1] &- 0x35fdc00
         i += 1
       else
         # Invalid byte
         codepoint = 0xfffd
       end
 
-      yield codepoint.chr
+      yield codepoint.unsafe_chr
 
       i += 1
     end
   end
 
   # Yields each decoded char in the given pointer, stopping at the first null byte.
-  private def self.each_utf16_char(pointer : Pointer(UInt16)) : Pointer(UInt16)
+  private def self.each_utf16_char(pointer : Pointer(UInt16), &) : Pointer(UInt16)
     loop do
       byte = pointer.value.to_i
       break if byte == 0
@@ -160,17 +152,17 @@ class String
       if byte < 0xd800 || byte >= 0xe000
         # One byte
         codepoint = byte
-      elsif 0xd800 <= byte < 0xdc00 &&
+      elsif byte < 0xdc00 &&
             0xdc00 <= (pointer + 1).value <= 0xdfff
         # Surrogate pair
         pointer = pointer + 1
-        codepoint = ((byte - 0xd800) << 10) + (pointer.value - 0xdc00) + 0x10000
+        codepoint = (byte << 10) &+ pointer.value &- 0x35fdc00
       else
         # Invalid byte
         codepoint = 0xfffd
       end
 
-      yield codepoint.chr
+      yield codepoint.unsafe_chr
 
       pointer = pointer + 1
     end

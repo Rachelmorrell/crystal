@@ -1,3 +1,5 @@
+require "crystal/system/print_error"
+
 # :nodoc:
 fun __crystal_malloc(size : UInt32) : Void*
   GC.malloc(LibC::SizeT.new(size))
@@ -47,32 +49,108 @@ fun __crystal_realloc64(ptr : Void*, size : UInt64) : Void*
 end
 
 module GC
-  record Stats,
-    # collections : LibC::ULong,
-    # bytes_found : LibC::Long,
-    heap_size : LibC::ULong,
-    free_bytes : LibC::ULong,
-    unmapped_bytes : LibC::ULong,
-    bytes_since_gc : LibC::ULong,
-    total_bytes : LibC::ULong
+  struct Stats
+    # The system memory allocated by the GC for its HEAP, in bytes. The memory
+    # may or may not have been allocated by the OS (for example some pages
+    # haven't been accessed). The number can grow and shrink as needed by the
+    # process.
+    getter heap_size : UInt64
+
+    # Approximate number of free bytes in the GC HEAP. The number is relative to
+    # the `#heap_size`. The reported value is pessimistic, there might be more
+    # free bytes in reality.
+    getter free_bytes : UInt64
+
+    # The size (in bytes) of virtual system memory that the GC returned to the
+    # OS when shrinking its HEAP. The OS may have reclaimed the memory already,
+    # reducing the resident memory usage, or may do so later (for example on
+    # memory pressure). The GC will reuse this memory when it needs to grow its
+    # HEAP again.
+    getter unmapped_bytes : UInt64
+
+    # Total memory allocated by the GC into its HEAP since the last GC
+    # collection, in bytes.
+    getter bytes_since_gc : UInt64
+
+    # Total memory allocated by the GC into its HEAP since the program started,
+    # in bytes. The number keeps growing indefinitely until the integer wraps
+    # back to zero.
+    getter total_bytes : UInt64
+
+    def initialize(@heap_size, @free_bytes, @unmapped_bytes, @bytes_since_gc, @total_bytes)
+    end
+
+    @[Deprecated]
+    def copy_with(heap_size = @heap_size, free_bytes = @free_bytes, unmapped_bytes = @unmapped_bytes, bytes_since_gc = @bytes_since_gc, total_bytes = @total_bytes)
+      self.class.new(heap_size, free_bytes, unmapped_bytes, bytes_since_gc, total_bytes)
+    end
+
+    @[Deprecated]
+    def clone
+      self.class.new(@heap_size.clone, @free_bytes.clone, @unmapped_bytes.clone, @bytes_since_gc.clone, @total_bytes.clone)
+    end
+  end
 
   record ProfStats,
-    heap_size : LibC::ULong,
-    free_bytes : LibC::ULong,
-    unmapped_bytes : LibC::ULong,
-    bytes_since_gc : LibC::ULong,
-    bytes_before_gc : LibC::ULong,
-    non_gc_bytes : LibC::ULong,
-    gc_no : LibC::ULong,
-    markers_m1 : LibC::ULong,
-    bytes_reclaimed_since_gc : LibC::ULong,
-    reclaimed_bytes_before_gc : LibC::ULong
+    heap_size : UInt64,
+    free_bytes : UInt64,
+    unmapped_bytes : UInt64,
+    bytes_since_gc : UInt64,
+    bytes_before_gc : UInt64,
+    non_gc_bytes : UInt64,
+    gc_no : UInt64,
+    markers_m1 : UInt64,
+    bytes_reclaimed_since_gc : UInt64,
+    reclaimed_bytes_before_gc : UInt64,
+    expl_freed_bytes_since_gc : UInt64,
+    obtained_from_os_bytes : UInt64
+
+  # Enables GC collections. This is the default behavior. The GC will collect
+  # memory when the HEAP is full. Must be called as many times as `GC.disable`
+  # was called.
+  def self.enable : Nil
+    {% raise "NotImplementedError: GC.enable" %}
+  end
+
+  # Disables GC collections. The GC will always increase the HEAP size when the
+  # HEAP is full. Call `GC.enable` as many times as `GC.disable` was called to
+  # reenable GC collections.
+  def self.disable : Nil
+    {% raise "NotImplementedError: GC.disable" %}
+  end
+
+  # :nodoc:
+  #
+  # Limit the heap size to *size* bytes.
+  # Useful when you are debugging, especially on systems that do not handle
+  # running out of memory well. Or as an alternative to the environment variable
+  # `GC_MAX_HEAP_SIZE`.
+  #
+  # A zero *size* means the heap is unbounded; this is the default.
+  # This setter function is unsynchronized (so it might require
+  # `GC_call_with_alloc_lock` to avoid data race).
+  def self.max_heap_size=(size : UInt64) : UInt64
+    {% raise "NotImplementedError: GC.max_heap_size=" %}
+  end
+
+  # :nodoc:
+  #
+  # Aborts the program when the GC failed to allocate memory. This method must
+  # not allocate memory itself: raising an exception would allocate the
+  # callstack and the unwind payload, which would fail again.
+  def self.oom(size : LibC::SizeT) : NoReturn
+    Crystal::System.print_error "Out of memory: failed to allocate %llu bytes\n", size
+    LibC.exit(1)
+  end
 
   # Allocates and clears *size* bytes of memory.
   #
   # The resulting object may contain pointers and they will be tracked by the GC.
   #
   # The memory will be automatically deallocated when unreferenced.
+  #
+  # If the memory can't be allocated (out of memory), the program aborts with
+  # an error message written to the standard error.
   def self.malloc(size : Int) : Void*
     malloc(LibC::SizeT.new(size))
   end
@@ -82,6 +160,9 @@ module GC
   # The client promises that the resulting object will never contain any pointers.
   #
   # The memory is not cleared. It will be automatically deallocated when unreferenced.
+  #
+  # If the memory can't be allocated (out of memory), the program aborts with
+  # an error message written to the standard error.
   def self.malloc_atomic(size : Int) : Void*
     malloc_atomic(LibC::SizeT.new(size))
   end
@@ -93,12 +174,49 @@ module GC
   # If *pointer* was allocated with `malloc_atomic`, the same constraints apply.
   #
   # The return value is a pointer that may be identical to *pointer* or different.
-  def self.realloc(pointer : Void*, size : Int) : Void*
-    realloc(pointer, LibC::SizeT.new(size))
+  #
+  # If the memory can't be allocated (out of memory), the program aborts with
+  # an error message written to the standard error.
+  #
+  # WARNING: Memory allocated using `Pointer.malloc` must be reallocated using
+  # `Pointer#realloc` instead.
+  def self.realloc(pointer : T*, size : Int) : T* forall T
+    realloc(pointer.as(Void*), LibC::SizeT.new(size)).as(T*)
+  end
+
+  # Collect the HEAP memory now, instead of waiting until the HEAP is full.
+  def self.collect : Nil
+  end
+
+  # :nodoc:
+  #
+  # Marks the thread as doing a call that doesn't involve the GC, for example a
+  # blocking syscall such as `nanosleep` or `pthread_cond_timedwait`.
+  #
+  # The GC records the stack pointer at the entrypoint of the function, so the
+  # thread's stack will be scanned up to the stack pointer. The thread won't
+  # need to be suspended or resumed on wakeup (for the duration of the block).
+  #
+  # WARNING: Allocating memory into the GC HEAP (e.g. raising an exception), or
+  # mutating memory allocated into the GC HEAP are undefined behavior.
+  #
+  # WARNING: A system error (e.g. Errno, WinError) must be read before the block
+  # terminates as the value can change before the method returns.
+  # abstract def self.syscall(&block : ->) : Nil
+
+  # Returns statistics about the current HEAP memory.
+  def self.stats : Stats
+    {% raise "NotImplementedError: GC.stats" %}
+  end
+
+  # Returns extended profiling statistics about the HEAP memory and GC
+  # collections.
+  def self.prof_stats : ProfStats
+    {% raise "NotImplementedError: GC.prof_stats" %}
   end
 end
 
-{% if flag?(:gc_none) %}
+{% if flag?(:gc_none) || flag?(:wasm32) %}
   require "gc/none"
 {% else %}
   require "gc/boehm"

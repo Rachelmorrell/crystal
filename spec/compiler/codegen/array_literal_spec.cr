@@ -2,7 +2,7 @@ require "../../spec_helper"
 
 describe "Code gen: array literal spec" do
   it "creates custom non-generic array" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Custom
         def initialize
           @value = 0
@@ -19,11 +19,11 @@ describe "Code gen: array literal spec" do
 
       custom = Custom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom generic array" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Custom(T)
         def initialize
           @value = 0
@@ -40,11 +40,11 @@ describe "Code gen: array literal spec" do
 
       custom = Custom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom generic array with type var" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Custom(T)
         def initialize
           @value = 0
@@ -61,11 +61,11 @@ describe "Code gen: array literal spec" do
 
       custom = Custom(Int32) {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom generic array via alias" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Custom(T)
         def initialize
           @value = 0
@@ -84,11 +84,11 @@ describe "Code gen: array literal spec" do
 
       custom = MyCustom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom generic array via alias (2)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Custom(T)
         def initialize
           @value = 0
@@ -107,11 +107,11 @@ describe "Code gen: array literal spec" do
 
       custom = MyCustom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom non-generic array in nested module" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       class Foo::Custom
         def initialize
           @value = 0
@@ -128,11 +128,11 @@ describe "Code gen: array literal spec" do
 
       custom = Foo::Custom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom non-generic array in module" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       module Moo
         class Custom
           def initialize
@@ -151,11 +151,11 @@ describe "Code gen: array literal spec" do
 
       custom = Moo::Custom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
   end
 
   it "creates custom generic array in module (#5684)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(6)
       module Moo
         class Custom(T)
           def initialize
@@ -174,7 +174,81 @@ describe "Code gen: array literal spec" do
 
       custom = Moo::Custom {1, 2, 3}
       custom.value
-      )).to_i.should eq(6)
+      CRYSTAL
+  end
+
+  it "creates custom non-generic array, with splats" do
+    run(<<-CRYSTAL).to_i.should eq(123456)
+      #{enumerable_element_type}
+
+      class Foo
+        def initialize(@x : Int32)
+        end
+
+        def first
+          0
+        end
+
+        def each
+          yield @x
+          yield @x &+ 1
+        end
+      end
+
+      class Custom
+        def initialize
+          @value = 0
+        end
+
+        def <<(element)
+          @value = @value &* 10 &+ element
+        end
+
+        def value
+          @value
+        end
+      end
+
+      custom = Custom {1, *Foo.new(2), 4, *Foo.new(5)}
+      custom.value
+      CRYSTAL
+  end
+
+  it "creates custom generic array, with splats" do
+    run(<<-CRYSTAL).to_i.should eq(123456)
+      #{enumerable_element_type}
+
+      class Foo
+        def initialize(@x : Int32)
+        end
+
+        def first
+          0
+        end
+
+        def each
+          yield @x
+          yield @x &+ 1
+        end
+      end
+
+      class Custom(T)
+        def initialize
+          @value = 0
+        end
+
+        def <<(element : T)
+          @value = @value &* 10 &+ element
+        end
+
+        def value
+          @value
+        end
+      end
+
+      custom = Custom {1, *Foo.new(2), 4, *Foo.new(5)}
+      custom.value
+      CRYSTAL
   end
 
   it "creates typed array" do
@@ -188,4 +262,16 @@ describe "Code gen: array literal spec" do
   it "assignment in array-like literal works" do
     run("require \"prelude\"; Array(Int32){a = 1}; a").to_i.should eq(1)
   end
+end
+
+private def enumerable_element_type
+  %(
+    module Enumerable(T)
+      def self.element_type(x)
+        x.each { |elem| return elem }
+        ret = uninitialized NoReturn
+        ret
+      end
+    end
+  )
 end

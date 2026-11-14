@@ -63,7 +63,7 @@ class PrettyPrint
   end
 
   # Appends a text element.
-  def text(obj)
+  def text(obj) : Nil
     obj = obj.to_s
     width = obj.size
     return if width == 0
@@ -84,7 +84,7 @@ class PrettyPrint
   end
 
   # Appends an element that can turn into a newline if necessary.
-  def breakable(sep = " ")
+  def breakable(sep = " ") : Nil
     width = sep.size
     group = @group_stack.last
     if group.break?
@@ -102,39 +102,44 @@ class PrettyPrint
 
   # Similar to `#breakable` except
   # the decision to break or not is determined individually.
-  def fill_breakable(sep = " ")
+  def fill_breakable(sep = " ") : Nil
     group { breakable sep }
   end
 
   # Creates a group of objects. Inside a group all breakable
   # objects are either turned into newlines or are output
   # as is, depending on the available width.
-  def group(indent = 0, open_obj = "", close_obj = "")
+  def group(indent = 0, open_obj = "", close_obj = "", &)
     text open_obj
-    group_sub do
-      nest(indent) do
-        yield
-      end
+    group = open_group
+    @indent += indent
+    begin
+      yield
+    ensure
+      @indent -= indent
+      close_group group
     end
     text close_obj
   end
 
-  private def group_sub
+  # Starts a group that the following breakables belong to.
+  private def open_group : Group
     group = Group.new(@group_stack.last.depth + 1)
     @group_stack.push group
     @group_queue.enq group
-    begin
-      yield
-    ensure
-      @group_stack.pop
-      if group.breakables.empty?
-        @group_queue.delete group
-      end
+    group
+  end
+
+  # Ends a group started by `#open_group`.
+  private def close_group(group : Group) : Nil
+    @group_stack.pop
+    if group.breakables.empty?
+      @group_queue.delete group
     end
   end
 
   # Increases the indentation for breakables inside the current group.
-  def nest(indent = 1)
+  def nest(indent = 1, &)
     @indent += indent
     begin
       yield
@@ -149,7 +154,7 @@ class PrettyPrint
   # text ","
   # breakable
   # ```
-  def comma
+  def comma : Nil
     text ","
     breakable
   end
@@ -157,7 +162,7 @@ class PrettyPrint
   # Appends a group that is surrounded by the given *left* and *right*
   # objects, and optionally is surrounded by the given breakable
   # objects.
-  def surround(left, right, left_break = "", right_break = "") : Nil
+  def surround(left, right, left_break = "", right_break = "", &) : Nil
     group(1, left, right) do
       breakable left_break if left_break
       yield
@@ -167,7 +172,7 @@ class PrettyPrint
 
   # Appends a list of elements surrounded by *left* and *right*
   # and separated by commas, yielding each element to the given block.
-  def list(left, elements, right) : Nil
+  def list(left, elements, right, &) : Nil
     group(1, left, right) do
       elements.each_with_index do |elem, i|
         comma if i > 0
@@ -184,8 +189,35 @@ class PrettyPrint
     end
   end
 
+  # Appends *key* and *separator* followed by *value*, in a group where *value* is nested after a breakable.
+  # If the group doesn't fit, *value* is moved to the next line.
+  #
+  # ```
+  # io = IO::Memory.new
+  # PrettyPrint.format(io, 20) do |pp|
+  #   pp.key_value "name", ": ", "Crystal"
+  # end
+  # io.to_s # => "name: \"Crystal\""
+  #
+  # io = IO::Memory.new
+  # PrettyPrint.format(io, 10) do |pp|
+  #   pp.key_value "name", ": ", "Crystal"
+  # end
+  # io.to_s # => "name: \n \"Crystal\""
+  # ```
+  def key_value(key : String, separator : String, value) : Nil
+    group do
+      text key
+      text separator
+      nest do
+        breakable ""
+        value.pretty_print(self)
+      end
+    end
+  end
+
   # Outputs any buffered data.
-  def flush
+  def flush : Nil
     @buffer.each do |data|
       @output_width = data.output(@output, @output_width)
     end
@@ -249,7 +281,7 @@ class PrettyPrint
       @break = false
     end
 
-    def break
+    def break : Nil
       @break = true
     end
   end
@@ -298,7 +330,7 @@ class PrettyPrint
 
   # Creates a pretty printer and yields it to the block,
   # appending any output to the given *io*.
-  def self.format(io : IO, width : Int32, newline = "\n", indent = 0)
+  def self.format(io : IO, width : Int32, newline = "\n", indent = 0, &)
     printer = PrettyPrint.new(io, width, newline, indent)
     yield printer
     printer.flush

@@ -17,21 +17,21 @@ describe "Code gen: primitives" do
   it "codegens int128" do
     # LLVM's JIT doesn't seem to support 128
     # bit integers well regarding GenericValue
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       require "prelude"
 
       1_i128.to_i
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "codegens uint128" do
     # LLVM's JIT doesn't seem to support 128
     # bit integers well regarding GenericValue
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(1)
       require "prelude"
 
       1_u128.to_i
-      )).to_i.should eq(1)
+      CRYSTAL
   end
 
   it "codegens char" do
@@ -54,48 +54,73 @@ describe "Code gen: primitives" do
     run(%("foo")).to_string.should eq("foo")
   end
 
-  it "codegens 1 + 2" do
-    run(%(require "prelude"; 1 + 2)).to_i.should eq(3)
-  end
+  describe "arithmetic primitives" do
+    # more detailed tests are done through the `primitives_spec` suite on a new
+    # generation of the compiler
 
-  it "codegens 1 &+ 2" do
-    run(%(1 &+ 2)).to_i.should eq(3)
-  end
+    it "codegens 1 + 2" do
+      run(%(require "prelude"; 1 + 2)).to_i.should eq(3)
+    end
 
-  it "codegens 1 - 2" do
-    run(%(require "prelude"; 1 - 2)).to_i.should eq(-1)
-  end
+    it "codegens 1 &+ 2" do
+      run(%(1 &+ 2)).to_i.should eq(3)
+    end
 
-  it "codegens 1 &- 2" do
-    run(%(1 &- 2)).to_i.should eq(-1)
-  end
+    it "codegens 1 - 2" do
+      run(%(require "prelude"; 1 - 2)).to_i.should eq(-1)
+    end
 
-  it "codegens 2 * 3" do
-    run(%(require "prelude"; 2 * 3)).to_i.should eq(6)
-  end
+    it "codegens 1 &- 2" do
+      run(%(1 &- 2)).to_i.should eq(-1)
+    end
 
-  it "codegens 2 &* 3" do
-    run(%(2 &* 3)).to_i.should eq(6)
-  end
+    it "codegens 2 * 3" do
+      run(%(require "prelude"; 2 * 3)).to_i.should eq(6)
+    end
 
-  it "codegens 8.unsafe_div 3" do
-    run(%(8.unsafe_div 3)).to_i.should eq(2)
-  end
+    it "codegens 2 &* 3" do
+      run(%(2 &* 3)).to_i.should eq(6)
+    end
 
-  it "codegens 8.unsafe_mod 3" do
-    run(%(10.unsafe_mod 3)).to_i.should eq(1)
-  end
+    it "codegens 8.unsafe_div 3" do
+      run(%(8.unsafe_div 3)).to_i.should eq(2)
+    end
 
-  it "codegens 16.unsafe_shr 2" do
-    run(%(16.unsafe_shr 2)).to_i.should eq(4)
-  end
+    it "codegens 8.unsafe_mod 3" do
+      run(%(10.unsafe_mod 3)).to_i.should eq(1)
+    end
 
-  it "codegens 16.unsafe_shl 2" do
-    run(%(16.unsafe_shl 2)).to_i.should eq(64)
+    it "codegens 16.unsafe_shr 2" do
+      run(%(16.unsafe_shr 2)).to_i.should eq(4)
+    end
+
+    it "codegens 16.unsafe_shl 2" do
+      run(%(16.unsafe_shl 2)).to_i.should eq(64)
+    end
+
+    it "codegens 1.to_i16!" do
+      run("1.to_i16!").to_i.should eq(1)
+    end
+
+    it "codegens 1.to_i16" do
+      run(%(require "prelude"; 1.to_i16)).to_i.should eq(1)
+    end
+
+    it "codegens 1.to_f!" do
+      run("1.to_f!").to_f64.should eq(1.0)
+    end
+
+    it "codegens 1.to_f" do
+      run(%(require "prelude"; 1.to_f)).to_f64.should eq(1.0)
+    end
+
+    it "skips bounds checking when to_i produces same type" do
+      run("1.to_i32").to_i.should eq(1)
+    end
   end
 
   it "defined method that calls primitive (bug)" do
-    run("
+    run(<<-CRYSTAL).to_i.should eq(1)
       struct Int64
         def foo
           to_u64!
@@ -104,18 +129,18 @@ describe "Code gen: primitives" do
 
       a = 1_i64
       a.foo.to_i!
-      ").to_i.should eq(1)
+      CRYSTAL
   end
 
   it "codegens __LINE__" do
-    run("
+    run(<<-CRYSTAL, inject_primitives: false).to_i.should eq(2)
 
       __LINE__
-      ", inject_primitives: false).to_i.should eq(3)
+      CRYSTAL
   end
 
   it "codegens crystal_type_id with union type" do
-    run("
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
       end
 
@@ -124,7 +149,7 @@ describe "Code gen: primitives" do
 
       f = Foo.allocate || Bar.allocate
       f.crystal_type_id == Foo.allocate.crystal_type_id
-      ").to_b.should be_true
+      CRYSTAL
   end
 
   it "doesn't treat `(1 == 1) == true` as `1 == 1 == true` (#328)" do
@@ -136,24 +161,24 @@ describe "Code gen: primitives" do
   end
 
   pending "codegens pointer of int" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(5)
       ptr = Pointer(Int).malloc(1_u64)
       ptr.value = 1
       ptr.value = 2_u8
       ptr.value = 3_u16
       ptr.value = 4_u32
       (ptr.value + 1).to_i32
-      )).to_i.should eq(5)
+      CRYSTAL
   end
 
   pending "sums two numbers out of an [] of Number" do
-    run(%(
+    run(<<-CRYSTAL).to_f32.should eq(2.5)
       p = Pointer(Number).malloc(2_u64)
       p.value = 1
       (p + 1_i64).value = 1.5
 
       (p.value + (p + 1_i64).value).to_f32
-      )).to_f32.should eq(2.5)
+      CRYSTAL
   end
 
   it "codegens crystal_type_id for class" do
@@ -161,29 +186,79 @@ describe "Code gen: primitives" do
   end
 
   it "can invoke cast on primitive typedef (#614)" do
-    codegen(%(
+    codegen(<<-CRYSTAL)
       lib Test
         type K = Int32
         fun foo : K
       end
 
       Test.foo.to_i!
-      ))
+      CRYSTAL
   end
 
   it "can invoke binary on primitive typedef (#614)" do
-    codegen(%(
+    codegen(<<-CRYSTAL)
       lib Test
         type K = Int32
         fun foo : K
       end
 
       Test.foo &+ 1
-      ))
+      CRYSTAL
+  end
+
+  it "can invoke binary on primitive typedef (2) (#16097)" do
+    codegen(<<-CRYSTAL)
+      lib Test
+        type K = Int32
+        fun foo : K
+      end
+
+      Test.foo == Test.foo
+      CRYSTAL
+  end
+
+  it "can invoke pointer primitives on typedef" do
+    codegen(<<-CRYSTAL)
+      lib Test
+        type K = Void*
+        fun foo : K
+      end
+
+      Test.foo + 1
+      Test.foo - Test.foo
+      Test.foo.realloc(1)
+      CRYSTAL
+  end
+
+  it "can invoke struct setter on primitive typedef" do
+    codegen(<<-CRYSTAL)
+      lib Test
+        struct Foo
+          x : Int32
+        end
+
+        type K = Foo
+        fun foo : K
+      end
+
+      Test.foo.x = 1
+      CRYSTAL
+  end
+
+  pending "can invoke proc call on primitive typedef" do
+    codegen(<<-CRYSTAL)
+      lib Test
+        type K = ->
+        fun foo : K
+      end
+
+      Test.foo.call
+      CRYSTAL
   end
 
   it "allows redefining a primitive method" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(42)
       struct Int32
         def *(other : Int32)
           42
@@ -191,11 +266,11 @@ describe "Code gen: primitives" do
       end
 
       1 * 2
-      )).to_i.should eq(42)
+      CRYSTAL
   end
 
   it "doesn't optimize away call whose obj is not passed as self (#2226)" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(2)
       class Global
         @@x = 0
 
@@ -215,73 +290,342 @@ describe "Code gen: primitives" do
       foo.class.crystal_type_id
 
       Global.x
-      )).to_i.should eq(2)
+      CRYSTAL
   end
 
   it "uses built-in llvm function that returns a tuple" do
-    run(%(
+    run(<<-CRYSTAL).to_i.should eq(3)
       lib Intrinsics
         fun sadd_i32_with_overflow = "llvm.sadd.with.overflow.i32"(a : Int32, b : Int32) : {Int32, Bool}
       end
 
       x, o = Intrinsics.sadd_i32_with_overflow(1, 2)
       x
-      )).to_i.should eq(3)
+      CRYSTAL
+  end
+
+  it "codegens `llvm.prefetch.*` from a non-main LLVM module (#17636)" do
+    p0 = {% if LibLLVM::IS_LT_150 %} "p0i8" {% else %} "p0" {% end %}
+
+    compile(<<-CRYSTAL)
+      lib Intrinsics
+        fun prefetch = "llvm.prefetch.#{p0}"(address : Void*, rw : Int32, locality : Int32, cache_type : Int32)
+      end
+
+      class Foo
+        def self.foo(p : Void*)
+          Intrinsics.prefetch(p, 0, 3, 1)
+        end
+      end
+
+      Foo.foo(Pointer(Void).new(0_u64))
+      CRYSTAL
   end
 
   it "gets crystal class instance type id" do
-    run(%(
+    run(<<-CRYSTAL).to_b.should be_true
       class Foo
       end
 
       Foo.new.crystal_type_id == Foo.crystal_instance_type_id
-      )).to_b.should be_true
+      CRYSTAL
+  end
+
+  it "gets `#crystal_instance_type_id` on a virtual metaclass" do
+    run(<<-CRYSTAL, Bool).should be_true
+      class Foo
+      end
+
+      class Bar < Foo
+      end
+
+      foo_v = Foo.as(Foo.class).crystal_instance_type_id
+      bar_v = Bar.as(Foo.class).crystal_instance_type_id
+      foo = Foo.crystal_instance_type_id
+      bar = Bar.crystal_instance_type_id
+
+      foo_v == foo && bar_v == bar && foo_v != bar_v
+      CRYSTAL
+  end
+
+  it "does not call `~instance_type` on generic metaclasses" do
+    mod = codegen(<<-CRYSTAL)
+      Array(Int32).crystal_instance_type_id
+      CRYSTAL
+
+    mod.to_s.should_not contain %(call i32 @"~instance_type")
   end
 
   describe "va_arg" do
-    # On Windows and AArch64 llvm's va_arg instruction works incorrectly.
-    {% unless flag?(:win32) || flag?(:aarch64) %}
-      it "uses llvm's va_arg instruction" do
-        mod = codegen(%(
+    # On AArch64 llvm's va_arg instruction works incorrectly.
+    {% unless flag?(:aarch64) %}
+      # On Windows the va_arg instruction is broken, so Crystal directly
+      # manipulates the `VaList` argument, similar to Clang
+      {% unless flag?(:win32) %}
+        it "uses llvm's va_arg instruction" do
+          mod = codegen(<<-CRYSTAL)
+            struct VaList
+              @[Primitive(:va_arg)]
+              def next(type)
+              end
+            end
+
+            list = VaList.new
+            list.next(Int32)
+            CRYSTAL
+          type = {% if LibLLVM::IS_LT_150 %} "%VaList*" {% else %} "ptr" {% end %}
+          str = mod.to_s
+          str.should contain("va_arg #{type} %list")
+        end
+      {% end %}
+
+      it "works with Crystal code" do
+        run(<<-CRYSTAL, Int32).should eq(6)
+          require "lib_c"
+          require "c/stdarg"
+
+          lib LibIntrinsics
+            \{% if #{LibLLVM::IS_LT_190} %}
+              fun va_start = "llvm.va_start"(ap : Void*)
+              fun va_end = "llvm.va_end"(ap : Void*)
+            \{% else %}
+              fun va_start = "llvm.va_start.p0"(ap : Void*)
+              fun va_end = "llvm.va_end.p0"(ap : Void*)
+            \{% end %}
+          end
+
           struct VaList
+            def initialize(@to_unsafe : LibC::VaList)
+            end
+
+            def self.open(&)
+              ap = uninitialized LibC::VaList
+              LibIntrinsics.va_start pointerof(ap)
+              yield new(ap)
+              LibIntrinsics.va_end pointerof(ap)
+            end
+
             @[Primitive(:va_arg)]
             def next(type)
             end
           end
 
-          list = VaList.new
-          list.next(Int32)
-        ))
-        str = mod.to_s
-        str.should contain("va_arg %VaList* %list")
+          fun foo_f(count : Int32, ...) : LibC::Int
+            sum = 0
+            VaList.open do |list|
+              while count > 0
+                sum &+= list.next(Int32)
+                count &-= 1
+              end
+            end
+            sum
+          end
+
+          x = 1
+          y = 2_i8
+          z = 3_u16
+          foo_f(3, x, y, z)
+          CRYSTAL
       end
 
-      it "works with C code" do
-        test_c(
-          %(
-            extern int foo_f(int,...);
-            int foo() {
-              return foo_f(3,1,2,3);
+      it "works with small element type" do
+        test_c(<<-C, <<-CRYSTAL, &.to_i.should eq(6))
+          extern int foo_f(int,...);
+          int foo() {
+            return foo_f(3,1,2,3);
+          }
+          C
+          lib LibFoo
+            fun foo() : LibC::Int
+          end
+
+          fun foo_f(count : Int32, ...) : LibC::Int
+            sum = 0
+            VaList.open do |list|
+              count.times do |i|
+                sum += list.next(Int32)
+              end
+            end
+            sum
+          end
+
+          LibFoo.foo
+          CRYSTAL
+      end
+
+      {% if flag?(:win32) %}
+        # On non-Windows platforms we use the va_arg instruction, and that
+        # doesn't support aggregate types
+        it "works with large element type" do
+          test_c(<<-C, <<-CRYSTAL, &.to_i.should eq(15182124))
+            #include <stdint.h>
+
+            typedef struct {
+              int64_t x, y, z, w;
+            } point_t;
+
+            extern int64_t foo_f(int, ...);
+
+            int64_t foo() {
+              point_t a = {.x = 1, .y = 2, .z = 3, .w = 4};
+              point_t b = {.x = 5, .y = 6, .z = 7, .w = 8};
+              point_t c = {.x = 9, .y = 10, .z = 11, .w = 12};
+              return foo_f(3, a, b, c);
             }
-          ),
-          %(
+            C
             lib LibFoo
-              fun foo() : LibC::Int
+              struct PointT
+                x : Int64
+                y : Int64
+                z : Int64
+                w : Int64
+              end
+
+              fun foo : Int64
             end
 
-            fun foo_f(count : Int32, ...) : LibC::Int
-              sum = 0
+            fun foo_f(count : Int32, ...) : Int64
+              sum = 0_i64
               VaList.open do |list|
                 count.times do |i|
-                  sum += list.next(Int32)
+                  point = list.next(LibFoo::PointT)
+                  sum += point.x * 1000000 + point.y * 10000 + point.z * 100 + point.w
                 end
               end
               sum
             end
 
             LibFoo.foo
-          ), &.to_i.should eq(6))
-      end
+            CRYSTAL
+        end
+      {% end %}
     {% end %}
+  end
+
+  describe "atomicrmw" do
+    it "codegens atomicrmw with enums" do
+      run(<<-CRYSTAL).to_i.should eq(3)
+        enum RMWBinOp
+          Add = 1
+        end
+
+        enum Ordering
+          SequentiallyConsistent = 7
+        end
+
+        @[Primitive(:atomicrmw)]
+        def atomicrmw(op : RMWBinOp, ptr : Int32*, val : Int32, ordering : Ordering, singlethread : Bool) : Int32
+        end
+
+        x = 1
+        atomicrmw(:add, pointerof(x), 2, :sequentially_consistent, false)
+        x
+        CRYSTAL
+    end
+
+    it "codegens atomicrmw with enums" do
+      run(<<-CRYSTAL).to_i.should eq(3)
+        enum RMWBinOp
+          Add = 1
+        end
+
+        enum Ordering
+          SequentiallyConsistent = 7
+        end
+
+        @[Primitive(:atomicrmw)]
+        def atomicrmw(op : RMWBinOp, ptr : Int32*, val : Int32, ordering : Ordering, singlethread : Bool) : Int32
+        end
+
+        x = 1
+        atomicrmw(RMWBinOp::Add, pointerof(x), 2, Ordering::SequentiallyConsistent, false)
+        x
+        CRYSTAL
+    end
+
+    # TODO: remove once support for 1.4 is dropped
+    it "codegens atomicrmw with symbols" do
+      run(<<-CRYSTAL).to_i.should eq(3)
+        @[Primitive(:atomicrmw)]
+        def atomicrmw(op : Symbol, ptr : Int32*, val : Int32, ordering : Symbol, singlethread : Bool) : Int32
+        end
+
+        x = 1
+        atomicrmw(:add, pointerof(x), 2, :sequentially_consistent, false)
+        x
+        CRYSTAL
+    end
+  end
+
+  it "allows @[Primitive] on method that has body" do
+    run(<<-CRYSTAL).to_string.should eq("hello")
+      module Moo
+        @[Primitive(:symbol_to_s)]
+        def self.symbol_to_s(symbol : Symbol) : String
+          untyped
+        end
+      end
+
+      Moo.symbol_to_s(:hello)
+      CRYSTAL
+  end
+
+  it "allows @[Primitive] on fun declarations" do
+    run(<<-CRYSTAL).to_i.should eq(1)
+      lib LibFoo
+        @[Primitive(:enum_value)]
+        fun enum_value(x : Int32) : Int32
+      end
+
+      LibFoo.enum_value(1)
+      CRYSTAL
+  end
+
+  it "codegens 32-bit allocation primitives properly, with __crystal_* (#17530)" do
+    compile(<<-CRYSTAL, target: "i386-linux-gnu")
+      struct Pointer(T)
+        @[Primitive(:pointer_malloc)]
+        def self.malloc(size : UInt64)
+        end
+
+        @[Primitive(:pointer_realloc)]
+        def realloc(size : UInt64) : self
+        end
+      end
+
+      fun __crystal_malloc_atomic64(size : UInt64) : Void*
+        Pointer(Void).new(0_u64)
+      end
+
+      fun __crystal_malloc64(size : UInt64) : Void*
+        Pointer(Void).new(0_u64)
+      end
+
+      fun __crystal_realloc64(ptr : Void*, size : UInt64) : Void*
+        Pointer(Void).new(0_u64)
+      end
+
+      x = Pointer(Int32).malloc(3) # atomic
+      y = Pointer(Void*).malloc(4) # non-atomic
+      z = y.realloc(5)
+      CRYSTAL
+  end
+
+  it "codegens 32-bit allocation primitives properly, without __crystal_* (#17530)" do
+    compile(<<-CRYSTAL, target: "i386-linux-gnu")
+      struct Pointer(T)
+        @[Primitive(:pointer_malloc)]
+        def self.malloc(size : UInt64)
+        end
+
+        @[Primitive(:pointer_realloc)]
+        def realloc(size : UInt64) : self
+        end
+      end
+
+      x = Pointer(Int32).malloc(3) # atomic
+      y = Pointer(Void*).malloc(4) # non-atomic
+      z = y.realloc(5)
+      CRYSTAL
   end
 end

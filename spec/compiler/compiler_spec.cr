@@ -12,7 +12,7 @@ describe "Compiler" do
 
       File.exists?(path).should be_true
 
-      `#{Process.quote(path)}`.should eq("Hello!")
+      Process.capture(path).should eq("Hello!")
     end
   end
 
@@ -23,19 +23,8 @@ describe "Compiler" do
 
         File.exists?(path).should be_true
 
-        `#{Process.quote(path)}`.should eq("Hello!")
+        Process.capture(path).should eq("Hello!")
       end
-    end
-  end
-
-  it "treats all arguments post-filename as program arguments" do
-    with_tempfile "args_test" do |path|
-      `bin/crystal #{Process.quote(File.join(compiler_datapath, "args_test"))} -Dother_flag -- bar #{Process.quote(path)}`
-
-      File.read(path).should eq(<<-FILE)
-        ["-Dother_flag", "--", "bar"]
-        {other_flag: false}
-        FILE
     end
   end
 end

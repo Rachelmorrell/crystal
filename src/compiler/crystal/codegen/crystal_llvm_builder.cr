@@ -2,7 +2,7 @@ module Crystal
   class CrystalLLVMBuilder
     property end : Bool
 
-    def initialize(@builder : LLVM::Builder, @llvm_typer : LLVMTyper, @printf : LLVM::Function)
+    def initialize(@builder : LLVM::Builder, @llvm_typer : LLVMTyper)
       @end = false
     end
 
@@ -38,16 +38,6 @@ module Crystal
       value
     end
 
-    def printf(format, args = [] of LLVM::Value, catch_pad = nil)
-      if catch_pad
-        funclet = build_operand_bundle_def("funclet", [catch_pad])
-      else
-        funclet = LLVM::OperandBundleDef.null
-      end
-
-      call @printf, [global_string_pointer(format)] + args, bundle: funclet
-    end
-
     def position_at_end(block)
       @builder.position_at_end block
       @end = false
@@ -61,17 +51,21 @@ module Crystal
       @builder.build_operand_bundle_def(name, values)
     end
 
+    def current_debug_location_metadata
+      @builder.current_debug_location_metadata
+    end
+
     def to_unsafe
       @builder.to_unsafe
     end
 
     {% for name in %w(add add_handler alloca and ashr atomicrmw bit_cast build_catch_ret call
-                     catch_pad catch_switch cmpxchg cond current_debug_location exact_sdiv
-                     extract_value fadd fcmp fdiv fence fmul fp2si fp2ui fpext fptrunc fsub
-                     global_string_pointer icmp inbounds_gep int2ptr invoke landing_pad load
-                     lshr mul not or phi ptr2int sdiv select set_current_debug_location sext
-                     shl si2fp srem store store_volatile sub switch trunc udiv ui2fp urem va_arg
-                     xor zext) %}
+                     catch_pad catch_switch clear_current_debug_location cmpxchg cond
+                     current_debug_location exact_sdiv extract_value fadd fcmp fdiv fence fmul
+                     fp2si fp2ui fpext fptrunc fsub global_string_pointer icmp inbounds_gep int2ptr
+                     invoke landing_pad load lshr mul not or phi ptr2int sdiv select
+                     set_current_debug_location sext shl si2fp srem store store_volatile sub switch
+                     trunc udiv ui2fp urem va_arg xor zext) %}
       def {{name.id}}(*args, **kwargs)
         return llvm_nil if @end
 

@@ -9,6 +9,8 @@ require "./uri/params"
 # their components or by parsing their string forms and methods for accessing the various
 # components of an instance.
 #
+# NOTE: To use `URI`, you must explicitly import it with `require "uri"`
+#
 # Basic example:
 #
 # ```
@@ -55,16 +57,18 @@ require "./uri/params"
 #
 # * `.decode(string : String, *, plus_to_space : Bool = false) : String`: Decodes a URL-encoded string.
 # * `.decode(string : String, io : IO, *, plus_to_space : Bool = false) : Nil`: Decodes a URL-encoded string to an IO.
-# * `.encode(string : String, *, space_to_plus : Bool = false) : String`: URL-encodes a string.
-# * `.encode(string : String, io : IO, *, space_to_plus : Bool = false) : Nil`: URL-encodes a string to an IO.
+# * `.encode_path(string : String) : String`: URL-encodes a string.
+# * `.encode_path(string : String, io : IO) : Nil`: URL-encodes a string to an IO.
+# * `.encode_path_segment(string : String) : String`: URL-encodes a string, escaping `/`.
+# * `.encode_path_segment(string : String, io : IO) : Nil`: URL-encodes a string to an IO, escaping `/`.
 # * `.decode_www_form(string : String, *, plus_to_space : Bool = true) : String`: Decodes an `x-www-form-urlencoded` string component.
 # * `.decode_www_form(string : String, io : IO, *, plus_to_space : Bool = true) : Nil`: Decodes an `x-www-form-urlencoded` string component to an IO.
 # * `.encode_www_form(string : String, *, space_to_plus : Bool = true) : String`: Encodes a string as a `x-www-form-urlencoded` component.
 # * `.encode_www_form(string : String, io : IO, *, space_to_plus : Bool = true) : Nil`: Encodes a string as a `x-www-form-urlencoded` component to an IO.
 #
-# The main difference is that `.encode_www_form` encodes reserved characters
-# (see `.reserved?`), while `.encode` does not. The decode methods are
-# identical except for the handling of `+` characters.
+# `.encode_www_form` encodes white space (` `) as `+`, while `.encode_path`
+# and `.encode_path_segment` encode it as `%20`. The decode methods differ regarding
+# the handling of `+` characters, respectively.
 #
 # NOTE: `URI::Params` provides a higher-level API for handling `x-www-form-urlencoded`
 # serialized data.
@@ -95,7 +99,9 @@ class URI
   getter host : String?
 
   # Sets the host component of the URI.
-  setter host : String?
+  def host=(host : String?)
+    @host = host && !host.starts_with?('[') && host.includes?(':') ? "[#{host}]" : host
+  end
 
   # Returns the port component of the URI.
   #
@@ -171,7 +177,9 @@ class URI
 
   def_equals_and_hash scheme, host, port, path, query, user, password, fragment
 
-  def initialize(@scheme = nil, @host = nil, @port = nil, @path = "", query : String | Params | Nil = nil, @user = nil, @password = nil, @fragment = nil)
+  def initialize(@scheme = nil, host = nil, @port = nil, @path = "", query : String | Params | Nil = nil, @user = nil, @password = nil, @fragment = nil)
+    # wrap IPv6 addresses
+    self.host = host
     @query = query.try(&.to_s)
   end
 
@@ -183,7 +191,7 @@ class URI
   # URI.parse("http://[::1]/bar").hostname # => "::1"
   # URI.parse("http://[::1]/bar").host     # => "[::1]"
   # ```
-  def hostname
+  def hostname : String?
     host.try { |host| self.class.unwrap_ipv6(host) }
   end
 
@@ -196,7 +204,7 @@ class URI
   # URI.unwrap_ipv6("127.0.0.1")   # => "127.0.0.1"
   # URI.unwrap_ipv6("example.com") # => "example.com"
   # ```
-  def self.unwrap_ipv6(host)
+  def self.unwrap_ipv6(host) : String
     if host.starts_with?('[') && host.ends_with?(']')
       host.byte_slice(1, host.bytesize - 2)
     else
@@ -219,7 +227,14 @@ class URI
   # uri.request_target # => "/?foo=bar"
   # ```
   def request_target : String
-    String.build do |str|
+    # Minimal size is 1 for an empty path (`"/"`)
+    string_size = @path.empty? ? 1 : @path.bytesize
+    if query = @query
+      # Add 1 for the query designator (`?`)
+      string_size += query.bytesize + 1
+    end
+
+    String.build(string_size) do |str|
       if @path.empty?
         str << "/" unless opaque?
       else
@@ -256,7 +271,7 @@ class URI
   # require "uri"
   #
   # uri = URI.parse "http://foo.com?id=30&limit=5#time=1305298413"
-  # uri.query_params # => URI::Params(@raw_params={"id" => ["30"], "limit" => ["5"]})
+  # uri.query_params # => URI::Params{"id" => ["30"], "limit" => ["5"]}
   # ```
   def query_params : URI::Params
     URI::Params.parse(@query || "")
@@ -273,6 +288,26 @@ class URI
   # ```
   def query_params=(params : URI::Params)
     self.query = params.to_s
+  end
+
+  # Yields the value of `#query_params` commits any modifications of the `URI::Params` instance to self.
+  # Returns the modified `URI::Params`
+  #
+  # ```
+  # require "uri"
+  # uri = URI.parse("http://foo.com?id=30&limit=5#time=1305298413")
+  # uri.update_query_params { |params| params.delete_all("limit") } # => URI::Params{"id" => ["30"]}
+  #
+  # puts uri.to_s # => "http://foo.com?id=30#time=1305298413"
+  # ```
+  def update_query_params(& : URI::Params -> _) : URI
+    params = query_params
+
+    yield params
+
+    self.query_params = params
+
+    self
   end
 
   # Returns the authority component of this URI.
@@ -303,7 +338,12 @@ class URI
     end
 
     if host = @host
-      URI.encode(host, io)
+      # https://datatracker.ietf.org/doc/html/rfc3986#section-3.2.2
+      #
+      # host        = IP-literal / IPv4address / reg-name
+      #
+      # The valid characters include unreserved, sub-delims, ':', '[', ']' (IPv6-Address)
+      URI.encode(host, io) { |byte| URI.unreserved?(byte) || URI.sub_delim?(byte) || byte.unsafe_chr.in?(':', '[', ']') }
     end
 
     if port = @port
@@ -422,15 +462,9 @@ class URI
     unless path.starts_with?('/')
       if path.empty?
         path = base
-      elsif !base.empty?
-        path = String.build do |io|
-          if base.ends_with?('/')
-            io << base
-          elsif pos = base.rindex('/')
-            io << base[0..pos]
-          end
-          io << path
-        end
+      elsif slash_rindex = base.rindex('/')
+        out_base = base[0..slash_rindex]
+        path = String.interpolation(out_base, path)
       end
     end
     remove_dot_segments(path)
@@ -469,7 +503,6 @@ class URI
 
     query = uri.query
     query = nil if query == @query
-    fragment = uri.fragment
 
     path = relativize_path(@path, uri.path)
 
@@ -479,7 +512,7 @@ class URI
   private def relativize_path(base : String, dst : String) : String
     return "" if base == dst
 
-    if base =~ %r{(?:\A|/)\.\.?(?:/|\z)} && dst.starts_with?('/')
+    if base.matches?(%r{(?:\A|/)\.\.?(?:/|\z)}) && dst.starts_with?('/')
       # dst has abnormal absolute path,
       # like "/./", "/../", "/x/../", ...
       return dst
@@ -507,26 +540,26 @@ class URI
       end
     end
 
-    tmp = dst_path.join('/')
     # calculate
     if base_path.empty?
       if dst_path.empty?
         "./"
       elsif dst_path.first.includes?(':') # (see RFC2396 Section 5)
-        String.build do |io|
+        string_size = 1 + dst_path.sum(&.bytesize) + dst_path.size
+        String.build(string_size) do |io|
           io << "./"
           dst_path.join(io, '/')
         end
       else
-        string = dst_path.join('/')
-        if string == ""
+        if dst_path.empty? || dst_path.first.empty?
           "./"
         else
-          string
+          dst_path.join('/')
         end
       end
     else
-      String.build do |io|
+      string_size = 3 * base_path.size + dst_path.sum(&.bytesize) + dst_path.size - 1
+      String.build(string_size) do |io|
         base_path.size.times { io << "../" }
         dst_path.join(io, '/')
       end
@@ -557,7 +590,7 @@ class URI
   # ```
   #
   # The return value is URL encoded (see `#encode_www_form`).
-  def userinfo
+  def userinfo : String?
     if user = @user
       String.build { |io| userinfo(user, io) }
     end
@@ -601,7 +634,7 @@ class URI
         result.pop if result.size > 0
         # D.  if the input buffer consists only of "." or "..", then remove
         #     that from the input buffer; otherwise,
-      elsif path == ".." || path == "."
+      elsif path.in?("..", ".")
         path = ""
         # E.  move the first path segment in the input buffer to the end of
         #     the output buffer, including the initial "/" character (if
@@ -711,6 +744,10 @@ class URI
   # Returns `true` if this URI's *port* is the default port for
   # its *scheme*.
   private def default_port?
-    (scheme = @scheme) && (port = @port) && port == URI.default_port(scheme)
+    if (scheme = @scheme) && (port = @port)
+      port == URI.default_port(scheme)
+    else
+      false
+    end
   end
 end

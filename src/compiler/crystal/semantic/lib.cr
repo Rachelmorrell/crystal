@@ -28,10 +28,6 @@ class Crystal::Call
 
     self.unbind_from old_target_defs if old_target_defs
     self.bind_to untyped_defs
-
-    if (parent_visitor = @parent_visitor) && (ptyped_def = parent_visitor.typed_def?) && untyped_defs.try(&.any?(&.raises?))
-      ptyped_def.raises = true
-    end
   end
 
   def check_lib_call_named_args(external)
@@ -57,11 +53,11 @@ class Crystal::Call
     named_args.each do |named_arg|
       found_index = external.args.index { |arg| arg.name == named_arg.name }
       unless found_index
-        named_arg.raise "no argument named '#{named_arg.name}'"
+        named_arg.raise "no parameter named '#{named_arg.name}'"
       end
 
       if covered[found_index]
-        named_arg.raise "argument '#{named_arg.name}' already specified"
+        named_arg.raise "argument for parameter '#{named_arg.name}' already specified"
       end
 
       covered[found_index] = true
@@ -95,17 +91,16 @@ class Crystal::Call
 
   def check_fun_args_size_match(obj_type, external)
     call_args_count = args.size
-    all_args_count = external.args.size
+    regular_params_count = external.args.size
 
-    if external.varargs? && call_args_count >= all_args_count
-      return
+    if external.varargs?
+      return if call_args_count >= regular_params_count
+    else
+      return if call_args_count == regular_params_count
     end
 
-    required_args_count = external.args.count { |arg| !arg.default_value }
-
-    return if required_args_count <= call_args_count <= all_args_count
-
-    wrong_number_of_arguments "'#{full_name(obj_type)}'", args.size, external.args.size
+    expected = external.varargs? ? "#{regular_params_count}+" : regular_params_count
+    wrong_number_of_arguments "'#{full_name(obj_type)}'", call_args_count, expected
   end
 
   def check_fun_out_args(untyped_def)
@@ -115,19 +110,23 @@ class Crystal::Call
         arg_type = arg.type
         if arg_type.is_a?(PointerInstanceType)
           if arg_type.element_type.remove_typedef.void?
-            call_arg.raise "can't use out with Void* (argument #{lib_arg_name(arg, i)} of #{untyped_def.owner}.#{untyped_def.name} is Void*)"
+            call_arg.raise "can't use out with Void* (parameter #{lib_arg_name(arg, i)} of #{untyped_def.owner}.#{untyped_def.name} is Void*)"
           end
 
-          if call_arg.exp.is_a?(Underscore)
+          case exp = call_arg.exp
+          when Underscore
             call_arg.exp.type = arg_type.element_type
           else
             var = parent_visitor.lookup_var_or_instance_var(call_arg.exp)
             var.bind_to Var.new("out", arg_type.element_type)
             call_arg.exp.bind_to var
-            parent_visitor.bind_meta_var(call_arg.exp)
+            if exp.is_a?(Var)
+              meta_var = parent_visitor.bind_meta_var(exp)
+              meta_var.freeze_type = arg_type.element_type
+            end
           end
         else
-          call_arg.raise "argument #{lib_arg_name(arg, i)} of #{untyped_def.owner}.#{untyped_def.name} cannot be passed as 'out' because it is not a pointer"
+          call_arg.raise "parameter #{lib_arg_name(arg, i)} of #{untyped_def.owner}.#{untyped_def.name} cannot be passed as 'out' because it is not a pointer"
         end
       end
     end
@@ -242,19 +241,7 @@ class Crystal::Call
 
       num = self_arg.to_number
 
-      self_arg.value =
-        case unaliased_type
-        when program.uint8  ; num.to_u8!.to_s
-        when program.uint16 ; num.to_u16!.to_s
-        when program.uint32 ; num.to_u32!.to_s
-        when program.uint64 ; num.to_u64!.to_s
-        when program.int8   ; num.to_i8!.to_s
-        when program.int16  ; num.to_i16!.to_s
-        when program.int32  ; num.to_i32!.to_s
-        when program.int64  ; num.to_i64!.to_s
-        when program.float32; num.to_f32!.to_s
-        else                  num.to_f64!.to_s
-        end
+      self_arg.value = unaliased_type.kind.cast!(num).to_s
       self_arg.kind = unaliased_type.kind
       self_arg.type = unaliased_type
       return true

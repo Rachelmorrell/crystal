@@ -1,5 +1,3 @@
-require "uri"
-require "http"
 require "mime"
 
 module MIME
@@ -64,7 +62,7 @@ module MIME
     # mime_type["foo"] = "bar"
     # mime_type["foo"] # => "bar"
     # ```
-    def []=(key : String, value : String)
+    def []=(key : String, value : String) : String
       raise Error.new("Invalid parameter name") unless MIME::MediaType.token? key
       @params[key] = value
     end
@@ -77,7 +75,7 @@ module MIME
     # MIME::MediaType.parse("x-application/example").fetch("foo", "baz")          # => "baz"
     # MIME::MediaType.parse("x-application/example; foo=bar").fetch("foo", "baz") # => "bar"
     # ```
-    def fetch(key : String, default)
+    def fetch(key : String, default : T) : String | T forall T
       @params.fetch(key, default)
     end
 
@@ -354,7 +352,7 @@ module MIME
       MediaType.new mediatype, params
     end
 
-    private def self.parse_parameter_value(reader)
+    private def self.parse_parameter_value(reader, &)
       reader = consume_whitespace(reader)
 
       # Quoted value.
@@ -371,10 +369,9 @@ module MIME
       value = String.build do |io|
         # Set positions for copying data from reader string to `io` in bulk.
         value_start = reader.pos
-        value_end = reader.pos
 
         while reader.has_next?
-          case char = reader.current_char
+          case reader.current_char
           when ';'
             break unless quoted
 
@@ -385,9 +382,8 @@ module MIME
             waiting_for_closing_quote = false
             break
           when '\\'
-            reader.next_char
+            char = reader.next_char
 
-            char = reader.current_char
             # Escape `\\` and `\"`
             if char == '\\' || (quoted && char == '"')
               # Write everything before the escaping backslash to io, then set
@@ -447,8 +443,8 @@ module MIME
     end
 
     private def self.decode_rfc2231(encoded : String)
-      encoding, split1, rest = encoded.partition('\'')
-      lang, split2, value = rest.partition('\'')
+      encoding, _, rest = encoded.partition('\'')
+      _lang, _, value = rest.partition('\'')
 
       return if encoding.empty? || value.empty?
 
@@ -483,27 +479,27 @@ module MIME
     end
 
     # :nodoc:
-    def self.token?(char : Char)
+    def self.token?(char : Char) : Bool
       !TSPECIAL_CHARACTERS.includes?(char) && 0x20 <= char.ord < 0x7F
     end
 
     # :nodoc:
-    def self.token?(string)
+    def self.token?(string : String) : Bool
       string.each_char.all? { |char| token? char }
     end
 
     # :nodoc:
-    def self.quote_string(string, io)
-      string.each_byte do |byte|
-        case byte
-        when '"'.ord, '\\'.ord
+    def self.quote_string(string : String, io : IO) : Nil
+      string.each_char do |char|
+        case char
+        when '"', '\\'
           io << '\\'
-        when 0x00..0x1F, 0x7F
-          raise ArgumentError.new("String contained invalid character #{byte.chr.inspect}")
+        when '\u{00}'..'\u{1F}', '\u{7F}'
+          raise ArgumentError.new("String contained invalid character #{char.inspect}")
         else
           # leave the byte as is
         end
-        io.write_byte byte
+        io << char
       end
     end
   end

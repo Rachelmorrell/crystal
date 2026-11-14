@@ -1,15 +1,5 @@
-{% skip_file if flag?(:win32) %}
-
-require "c/dlfcn"
-require "c/stdio"
-require "c/string"
-require "./lib_unwind"
-
-{% if flag?(:darwin) || flag?(:bsd) || flag?(:linux) %}
-  require "./call_stack/dwarf"
-{% else %}
-  require "./call_stack/null"
-{% end %}
+require "crystal/lru_cache"
+require "sync/exclusive"
 
 # Returns the current execution stack as an array containing strings
 # usually in the form file:line:column or file:line:column in 'method'.
@@ -21,208 +11,164 @@ end
 struct Exception::CallStack
   # Compute current directory at the beginning so filenames
   # are always shown relative to the *starting* working directory.
-  CURRENT_DIR = begin
-    dir = Process::INITIAL_PWD
-    dir += File::SEPARATOR unless dir.ends_with?(File::SEPARATOR)
-    dir
-  end
+  private CURRENT_DIR = Process::INITIAL_PWD.try { |dir| Path[dir] }
 
   @@skip = [] of String
 
-  def self.skip(filename)
+  def self.skip(filename) : Nil
     @@skip << filename
   end
 
   skip(__FILE__)
 
+  @@loaded = false
+  @@lru_cache = Sync::Exclusive(Crystal::LRUCache(Void*, String?)).new(Crystal::LRUCache(Void*, String?).new(1024))
+
+  # :nodoc:
+  def self.load_debug_info : Nil
+    Crystal.once(pointerof(@@loaded)) do
+      next if ENV["CRYSTAL_LOAD_DEBUG_INFO"]? == "0"
+
+      begin
+        load_debug_info_impl
+      rescue ex
+        Crystal::System.print_exception "Unable to load debug information", ex
+      end
+    end
+  end
+
   @callstack : Array(Void*)
   @backtrace : Array(String)?
 
-  def initialize
-    @callstack = CallStack.unwind
+  def initialize(@callstack : Array(Void*) = CallStack.unwind)
   end
 
-  def printable_backtrace
+  class_getter empty = new([] of Void*)
+
+  def printable_backtrace : Array(String)
     @backtrace ||= decode_backtrace
   end
 
-  {% if flag?(:gnu) && flag?(:i386) %}
-    # This is only used for the workaround described in `Exception.unwind`
-    @@makecontext_range : Range(Void*, Void*)?
+  private def decode_backtrace
+    {% if flag?(:wasm32) %}
+      [] of String
+    {% else %}
+      CallStack.load_debug_info
+      show_full_info = ENV["CRYSTAL_CALLSTACK_FULL_INFO"]? == "1"
 
-    def self.makecontext_range
-      @@makecontext_range ||= begin
-        makecontext_start = makecontext_end = LibC.dlsym(LibC::RTLD_DEFAULT, "makecontext")
-
-        while true
-          ret = LibC.dladdr(makecontext_end, out info)
-          break if ret == 0 || info.dli_sname.null?
-          break unless LibC.strcmp(info.dli_sname, "makecontext") == 0
-          makecontext_end += 1
-        end
-
-        (makecontext_start...makecontext_end)
-      end
-    end
-  {% end %}
-
-  protected def self.unwind
-    callstack = [] of Void*
-    backtrace_fn = ->(context : LibUnwind::Context, data : Void*) do
-      bt = data.as(typeof(callstack))
-
-      ip = {% if flag?(:arm) %}
-             Pointer(Void).new(__crystal_unwind_get_ip(context))
-           {% else %}
-             Pointer(Void).new(LibUnwind.get_ip(context))
-           {% end %}
-      bt << ip
-
-      {% if flag?(:gnu) && flag?(:i386) %}
-        # This is a workaround for glibc bug: https://sourceware.org/bugzilla/show_bug.cgi?id=18635
-        # The unwind info is corrupted when `makecontext` is used.
-        # Stop the backtrace here. There is nothing interest beyond this point anyway.
-        if CallStack.makecontext_range.includes?(ip)
-          return LibUnwind::ReasonCode::END_OF_STACK
-        end
-      {% end %}
-
-      LibUnwind::ReasonCode::NO_REASON
-    end
-
-    LibUnwind.backtrace(backtrace_fn, callstack.as(Void*))
-    callstack
-  end
-
-  struct RepeatedFrame
-    getter ip : Void*, count : Int32
-
-    def initialize(@ip : Void*)
-      @count = 0
-    end
-
-    def incr
-      @count += 1
-    end
-  end
-
-  def self.print_backtrace
-    backtrace_fn = ->(context : LibUnwind::Context, data : Void*) do
-      last_frame = data.as(RepeatedFrame*)
-
-      ip = {% if flag?(:arm) %}
-             Pointer(Void).new(__crystal_unwind_get_ip(context))
-           {% else %}
-             Pointer(Void).new(LibUnwind.get_ip(context))
-           {% end %}
-
-      if last_frame.value.ip == ip
-        last_frame.value.incr
-      else
-        print_frame(last_frame.value) unless last_frame.value.ip.address == 0
-        last_frame.value = RepeatedFrame.new ip
-      end
-      LibUnwind::ReasonCode::NO_REASON
-    end
-
-    rf = RepeatedFrame.new(Pointer(Void).null)
-    LibUnwind.backtrace(backtrace_fn, pointerof(rf).as(Void*))
-    print_frame(rf)
-  end
-
-  private def self.print_frame(repeated_frame)
-    {% if flag?(:debug) %}
-      if @@dwarf_loaded &&
-         (name = decode_function_name(repeated_frame.ip.address))
-        file, line, column = Exception::CallStack.decode_line_number(repeated_frame.ip.address)
-        if file && file != "??"
-          if repeated_frame.count == 0
-            Crystal::System.print_error "[0x%lx] %s at %s:%ld:%i\n", repeated_frame.ip, name, file, line, column
-          else
-            Crystal::System.print_error "[0x%lx] %s at %s:%ld:%i (%ld times)\n", repeated_frame.ip, name, file, line, column, repeated_frame.count + 1
-          end
-          return
-        end
+      @callstack.compact_map do |ip|
+        CallStack.decode_backtrace_frame(ip, show_full_info)
       end
     {% end %}
-
-    frame = decode_frame(repeated_frame.ip)
-    if frame
-      offset, sname = frame
-      if repeated_frame.count == 0
-        Crystal::System.print_error "[0x%lx] %s +%ld\n", repeated_frame.ip, sname, offset
-      else
-        Crystal::System.print_error "[0x%lx] %s +%ld (%ld times)\n", repeated_frame.ip, sname, offset, repeated_frame.count + 1
-      end
-    else
-      if repeated_frame.count == 0
-        Crystal::System.print_error "[0x%lx] ???\n", repeated_frame.ip
-      else
-        Crystal::System.print_error "[0x%lx] ??? (%ld times)\n", repeated_frame.ip, repeated_frame.count + 1
-      end
-    end
   end
 
-  private def decode_backtrace
-    show_full_info = ENV["CRYSTAL_CALLSTACK_FULL_INFO"]? == "1"
+  # :nodoc:
+  def self.decode_backtrace_frame(ip, show_full_info) : String?
+    cache_miss = false
 
-    @callstack.compact_map do |ip|
-      pc = CallStack.decode_address(ip)
+    line = @@lru_cache.lock(&.fetch(ip) do
+      cache_miss = true
+      nil
+    end)
 
-      file, line, column = CallStack.decode_line_number(pc)
+    if cache_miss
+      pc = decode_address(ip)
+      file, line_number, column_number = decode_line_number(pc)
 
-      if file && file != "??"
-        next if @@skip.includes?(file)
-
-        # Turn to relative to the current dir, if possible
-        file = file.lchop(CURRENT_DIR)
-
-        file_line_column = "#{file}:#{line}:#{column}"
+      unless @@skip.includes?(file)
+        file = relative_to_initial_directory(file)
+        function, file = function_or_symbol_name(ip, file, show_full_info) { decode_function_name(pc) }
+        line = format_backtrace_frame(file, line_number, column_number, function, show_full_info ? ip : nil)
       end
 
-      if name = CallStack.decode_function_name(pc)
-        function = name
-      elsif frame = CallStack.decode_frame(ip)
-        _, sname = frame
-        function = String.new(sname)
+      @@lru_cache.lock(&.put(ip, line))
+    end
 
-        # Crystal methods (their mangled name) start with `*`, so
-        # we remove that to have less clutter in the output.
-        function = function.lchop('*')
-      else
-        function = "???"
-      end
+    line
+  end
 
-      if file_line_column
-        if show_full_info && (frame = CallStack.decode_frame(ip))
-          _, sname = frame
-          line = "#{file_line_column} in '#{String.new(sname)}'"
-        else
-          line = "#{file_line_column} in '#{function}'"
+  private def self.format_backtrace_frame(file, line_number, column_number, function, ip) : String
+    return "???" if file == "??" && function == "??"
+
+    String.build do |str|
+      str << file
+
+      unless file == "??" || line_number == 0
+        str << ':'
+        str << line_number
+
+        unless column_number == 0
+          str << ':'
+          str << column_number
         end
-      else
-        line = function
       end
 
-      if show_full_info
-        line = "#{line} at 0x#{ip.address.to_s(16)}"
-      end
+      str << " in '" << function << '\''
 
-      line
+      if ip
+        str << " at 0x"
+        ip.address.to_s(str, 16)
+      end
     end
   end
 
-  protected def self.decode_frame(ip, original_ip = ip)
-    if LibC.dladdr(ip, out info) != 0
-      offset = original_ip - info.dli_saddr
+  # Transforms the dynamic unwinded IP into a fixed PC.
+  #
+  # The IP may be subject to Address space layout randomization (ASLR)
+  # where the executable is loaded at a random address. See
+  # https://en.wikipedia.org/wiki/Address_space_layout_randomization
+  #
+  # The IP is the return address and thus points to the next instruction, that
+  # usually share the same context, but sometimes don't (e.g. noreturn). See
+  # DWARF § 6.4.4.
+  # private def self.decode_address(ip : Void*)
 
-      if offset == 0
-        return decode_frame(ip - 1, original_ip)
-      end
+  private def self.function_or_symbol_name(ip, file, show_full_info, &)
+    if show_full_info && (frame = decode_frame(ip))
+      _, symbol, _ = frame
+      return {symbol, file}
+    end
 
-      unless info.dli_sname.null?
-        {offset, info.dli_sname}
+    if function = yield
+      return {function, file}
+    end
+
+    if !show_full_info && (frame = decode_frame(ip))
+      _, symbol, file = frame
+      # Crystal methods (their mangled name) start with `*`, so
+      # we remove that to have less clutter in the output.
+      symbol = symbol.lchop('*')
+      return {symbol, file}
+    end
+
+    {"??", file}
+  end
+
+  private def self.relative_to_initial_directory(file)
+    if file != "??" && (current_dir = CURRENT_DIR)
+      if rel = Path[file].relative_to?(current_dir)
+        rel = rel.to_s
+        return rel unless rel.starts_with?("..")
       end
     end
+    file
   end
 end
+
+{% if flag?(:interpreted) %}
+  require "./call_stack/interpreter"
+{% elsif flag?(:win32) && !flag?(:gnu) %}
+  require "./call_stack/stackwalk"
+{% elsif flag?(:wasm32) %}
+  require "./call_stack/null"
+{% else %}
+  {% if flag?(:darwin) %}
+    require "./call_stack/mach_o"
+  {% elsif flag?(:win32) %}
+    require "./call_stack/pe"
+  {% else %}
+    require "./call_stack/elf"
+  {% end %}
+  require "./call_stack/dwarf"
+  require "./call_stack/libunwind"
+{% end %}

@@ -42,18 +42,50 @@ class Crystal::CodeGenVisitor
 
   def declare_const(const)
     global_name = const.llvm_name
-    global = @main_mod.globals[global_name]? ||
-             @main_mod.globals.add(@main_llvm_typer.llvm_type(const.value.type), global_name)
+    global = @main_mod.globals[global_name]?
+    unless global
+      global = @main_mod.globals.add(@main_llvm_typer.llvm_type(const.value.type), global_name)
 
-    type = const.value.type
-    # TODO: there's an LLVM bug that prevents us from having internal globals of type i128 or u128:
-    # https://bugs.llvm.org/show_bug.cgi?id=42932
-    # so we just use global.
-    if @single_module && !(type.is_a?(IntegerType) && (type.kind == :i128 || type.kind == :u128))
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      type = const.value.type
+      # TODO: LLVM < 9.0.0 has a bug that prevents us from having internal globals of type i128 or u128:
+      # https://bugs.llvm.org/show_bug.cgi?id=42932
+      # so we just use global in that case.
+      {% if compare_versions(Crystal::LLVM_VERSION, "9.0.0") < 0 %}
+        if @single_module && !(type.is_a?(IntegerType) && (type.kind.i128? || type.kind.u128?))
+          global.linkage = LLVM::Linkage::Internal
+        end
+      {% else %}
+        global.linkage = LLVM::Linkage::Internal if @single_module
+      {% end %}
+
+      declare_const_debug_info(global, const) if @debug.variables?
     end
 
     global
+  end
+
+  private def declare_const_debug_info(global, const)
+    location = const.locations.try(&.first?).try(&.expanded_location)
+    return unless location
+
+    debug_type = in_main { get_debug_type(const.value.type) }
+    return unless debug_type
+
+    file, dir = file_and_dir(location.filename)
+    builder = di_builder(@main_mod)
+    file_metadata = builder.create_file(file, dir)
+
+    gv_expr = builder.create_global_variable_expression(
+      scope: file_metadata,
+      name: const.llvm_name,
+      linkage_name: const.llvm_name,
+      file: file_metadata,
+      line: location.line_number,
+      type: debug_type,
+      local_to_unit: @single_module
+    )
+
+    global.global_set_metadata("dbg", gv_expr)
   end
 
   def declare_const_initialized_flag(const)
@@ -72,14 +104,14 @@ class Crystal::CodeGenVisitor
   end
 
   def initialize_simple_const(const)
+    set_current_debug_location const.locations.try &.first? if @debug.line_numbers?
+
     global = declare_const(const)
-    request_value do
-      accept const.value
-    end
+    request_value(const.value)
 
     const_type = const.value.type
     if const_type.passed_by_value?
-      @last = load @last
+      @last = load llvm_type(const_type), @last
     end
 
     global.initializer = @last
@@ -100,15 +132,15 @@ class Crystal::CodeGenVisitor
       # Start with fresh variables
       context.vars = LLVMVars.new
 
+      set_current_debug_location const.locations.try &.first? if @debug.line_numbers?
+
       alloca_vars const.fake_def.try(&.vars), const.fake_def
-      request_value do
-        accept const.value
-      end
+      request_value(const.value)
     end
 
     const_type = const.value.type
     if const_type.passed_by_value?
-      @last = load @last
+      @last = load llvm_type(const_type), @last
     end
 
     store @last, global
@@ -128,7 +160,7 @@ class Crystal::CodeGenVisitor
     return global if const.initializer
 
     init_function_name = "~#{const.initialized_llvm_name}"
-    func = @main_mod.functions[init_function_name]? || create_initialize_const_function(init_function_name, const)
+    func = typed_fun?(@main_mod, init_function_name) || create_initialize_const_function(init_function_name, const)
     func = check_main_fun init_function_name, func
 
     set_current_debug_location const.locations.try &.first? if @debug.line_numbers?
@@ -142,10 +174,12 @@ class Crystal::CodeGenVisitor
   end
 
   def create_initialize_const_function(fun_name, const)
-    global, initialized_flag = declare_const_and_initialized_flag(const)
+    global, _ = declare_const_and_initialized_flag(const)
 
     in_main do
       define_main_function(fun_name, ([] of LLVM::Type), llvm_context.void, needs_alloca: true) do |func|
+        set_internal_fun_debug_location(func, fun_name, const.locations.try &.first?)
+
         with_cloned_context do
           # "self" in a constant is the constant's namespace
           context.type = const.namespace
@@ -155,25 +189,23 @@ class Crystal::CodeGenVisitor
 
           alloca_vars const.fake_def.try(&.vars), const.fake_def
 
-          request_value do
-            accept const.value
-          end
+          request_value(const.value)
 
-          if const.value.type.passed_by_value?
-            @last = load @last
+          const_type = const.value.type
+          if const_type.passed_by_value?
+            @last = load llvm_type(const_type), @last
           end
 
           if @last.constant?
             global.initializer = @last
             global.global_constant = true
 
-            const_type = const.value.type
             if const_type.is_a?(PrimitiveType) || const_type.is_a?(EnumType)
               const.initializer = @last
             end
           else
-            global.initializer = llvm_type(const.value.type).null
-            unless const.value.type.nil_type? || const.value.type.void?
+            global.initializer = llvm_type(const_type).null
+            unless const_type.nil_type? || const_type.void?
               store @last, global
             end
           end
@@ -184,21 +216,24 @@ class Crystal::CodeGenVisitor
     end
   end
 
-  def read_const(const)
-    # We inline constants. Otherwise we use an LLVM const global.
+  def read_const(const, node)
+    # We inline literal constants. Otherwise we use an LLVM const global.
     @last =
       case value = const.compile_time_value
-      when Bool   then int1(value ? 1 : 0)
-      when Char   then int32(value.ord)
-      when Int8   then int8(value)
-      when Int16  then int16(value)
-      when Int32  then int32(value)
-      when Int64  then int64(value)
-      when UInt8  then int8(value)
-      when UInt16 then int16(value)
-      when UInt32 then int32(value)
-      when UInt64 then int64(value)
+      when Bool    then int1(value ? 1 : 0)
+      when Char    then int32(value.ord)
+      when Int8    then int8(value)
+      when Int16   then int16(value)
+      when Int32   then int32(value)
+      when Int64   then int64(value)
+      when Int128  then int128(value)
+      when UInt8   then int8(value)
+      when UInt16  then int16(value)
+      when UInt32  then int32(value)
+      when UInt64  then int64(value)
+      when UInt128 then int128(value)
       else
+        set_current_debug_location node if @debug.line_numbers?
         last = read_const_pointer(const)
         to_lhs last, const.value.type
       end
@@ -219,8 +254,8 @@ class Crystal::CodeGenVisitor
       return global
     end
 
-    read_function_name = "~#{const.llvm_name}:read"
-    func = @main_mod.functions[read_function_name]? || create_read_const_function(read_function_name, const)
+    read_function_name = "~#{const.llvm_name}:const_read"
+    func = typed_fun?(@main_mod, read_function_name) || create_read_const_function(read_function_name, const)
     func = check_main_fun read_function_name, func
     call func
   end
@@ -228,6 +263,7 @@ class Crystal::CodeGenVisitor
   def create_read_const_function(fun_name, const)
     in_main do
       define_main_function(fun_name, ([] of LLVM::Type), llvm_type(const.value.type).pointer) do |func|
+        set_internal_fun_debug_location(func, fun_name, const.locations.try &.first?)
         global = initialize_const(const)
         ret global
       end

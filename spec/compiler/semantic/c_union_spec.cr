@@ -26,15 +26,15 @@ describe "Semantic: c union" do
   end
 
   it "types union setter via pointer" do
-    assert_type("lib LibFoo; union Bar; x : Int32; y : Float64; end; end; bar = Pointer(LibFoo::Bar).malloc(1_u64); bar.value.x = 1") { int32 }
+    assert_type("lib LibFoo; union Bar; x : Int32; y : Float64; end; end; bar = Pointer(LibFoo::Bar).malloc(1_u64); bar.value.x = 1", inject_primitives: true) { int32 }
   end
 
   it "types union getter via pointer" do
-    assert_type("lib LibFoo; union Bar; x : Int32; y : Float64; end; end; bar = Pointer(LibFoo::Bar).malloc(1_u64); bar.value.x") { int32 }
+    assert_type("lib LibFoo; union Bar; x : Int32; y : Float64; end; end; bar = Pointer(LibFoo::Bar).malloc(1_u64); bar.value.x", inject_primitives: true) { int32 }
   end
 
   it "errors if setting closure" do
-    assert_error %(
+    assert_error <<-CRYSTAL, "can't set closure as C union member"
       lib LibFoo
         union Bar
           x : ->
@@ -45,33 +45,30 @@ describe "Semantic: c union" do
 
       bar = LibFoo::Bar.new
       bar.x = -> { a }
-      ),
-      "can't set closure as C union member"
+      CRYSTAL
   end
 
   it "errors on empty c union (#633)" do
-    assert_error %(
+    assert_error <<-CRYSTAL, "empty unions are disallowed"
       lib LibFoo
         union Struct
         end
       end
-      ),
-      "empty unions are disallowed"
+      CRYSTAL
   end
 
   it "errors if using void in union field type" do
-    assert_error %(
+    assert_error <<-CRYSTAL, "can't use Void as a union field type"
       lib LibFoo
         union Struct
           x : Void
         end
       end
-      ),
-      "can't use Void as a union field type"
+      CRYSTAL
   end
 
   it "errors if using void via typedef in union field type" do
-    assert_error %(
+    assert_error <<-CRYSTAL, "can't use Void as a union field type"
       lib LibFoo
         type MyVoid = Void
 
@@ -79,7 +76,6 @@ describe "Semantic: c union" do
           x : MyVoid
         end
       end
-      ),
-      "can't use Void as a union field type"
+      CRYSTAL
   end
 end

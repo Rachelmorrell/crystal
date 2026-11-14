@@ -2,37 +2,34 @@ require "log"
 
 # A handler that logs the request method, resource, status code, and
 # the time used to execute the next handler
+#
+# NOTE: To use `LogHandler`, you must explicitly import it with `require "http"`
 class HTTP::LogHandler
   include HTTP::Handler
 
   def initialize(@log = Log.for("http.server"))
   end
 
-  def call(context)
-    start = Time.monotonic
+  def call(context : HTTP::Server::Context) : Nil
+    start = Time.instant
 
     begin
       call_next(context)
     ensure
-      elapsed = Time.monotonic - start
-      elapsed_text = elapsed_text(elapsed)
+      elapsed_text = elapsed_text(start.elapsed)
 
       req = context.request
       res = context.response
 
       addr =
-        {% begin %}
-        case remote_address = req.remote_address
+        case remote_address = context.remote_address
         when nil
           "-"
-        {% unless flag?(:win32) %}
         when Socket::IPAddress
           remote_address.address
-        {% end %}
         else
           remote_address
         end
-        {% end %}
 
       @log.info { "#{addr} - #{req.method} #{req.resource} #{req.version} - #{res.status_code} (#{elapsed_text})" }
     end

@@ -1,6 +1,7 @@
 require "./spec_helper"
 require "../spec_helper"
 require "http/web_socket"
+require "http/server"
 require "random/secure"
 require "../../support/fibers"
 require "../../support/ssl"
@@ -37,12 +38,21 @@ private class MalformerHandler
   end
 end
 
+private def protocol_pair(&)
+  IO::Stapled.pipe do |io1, io2|
+    client = HTTP::WebSocket::Protocol.new(io1, masked: true)
+    server = HTTP::WebSocket::Protocol.new(io2)
+
+    yield client, server
+  end
+end
+
 describe HTTP::WebSocket do
-  describe "receive" do
+  describe "Protocol#receive" do
     it "can read a small text packet" do
       data = Bytes[0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(64)
       result = ws.receive(buffer)
@@ -54,7 +64,7 @@ describe HTTP::WebSocket do
       data = Bytes[0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
         0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(3)
 
@@ -93,7 +103,7 @@ describe HTTP::WebSocket do
         0x01, 0x03, 0x48, 0x65, 0x6c, 0x80, 0x02, 0x6c, 0x6f]
 
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(10)
 
@@ -111,7 +121,7 @@ describe HTTP::WebSocket do
     it "read ping packet" do
       data = Bytes[0x89, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(64)
       result = ws.receive(buffer)
@@ -124,7 +134,7 @@ describe HTTP::WebSocket do
         0x89, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
         0x80, 0x02, 0x6c, 0x6f]
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(64)
 
@@ -156,11 +166,11 @@ describe HTTP::WebSocket do
     it "read very long packet" do
       data = Bytes.new(10 + 0x010000)
 
-      header = Bytes[0x82, 127_u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0]
+      header = Bytes[0x82, 127_u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]
       data.copy_from(header)
 
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(0x010000)
 
@@ -171,18 +181,105 @@ describe HTTP::WebSocket do
     it "can read a close packet" do
       data = Bytes[0x88, 0x00]
       io = IO::Memory.new(data)
-      ws = HTTP::WebSocket::Protocol.new(io)
+      ws = HTTP::WebSocket::Protocol.new(io, masked: true)
 
       buffer = Bytes.new(64)
       result = ws.receive(buffer)
       assert_close_packet result, 0, final: true
     end
+
+    it "server rejects unmasked frames" do
+      IO::Stapled.pipe do |io1, io2|
+        # Unmasked frame with payload "foobar"
+        io2.write Bytes[129, 6, 102, 111, 111, 98, 97, 114]
+
+        buffer = Bytes.new(6)
+        server = HTTP::WebSocket::Protocol.new(io1)
+
+        expect_raises(Exception, "Protocol error: expected masked frame") do
+          server.receive(buffer)
+        end
+
+        client = HTTP::WebSocket::Protocol.new(io2, masked: true)
+        info = client.receive(buffer)
+        info.opcode.should eq HTTP::WebSocket::Protocol::Opcode::CLOSE
+        info.size.should eq 2
+        IO::ByteFormat::NetworkEndian.decode(UInt16, buffer).should eq HTTP::WebSocket::CloseCode::ProtocolError.value
+      end
+    end
+
+    it "client rejects masked frames" do
+      IO::Stapled.pipe do |io1, io2|
+        # Masked frame with payload "foobar"
+        io1.write Bytes[129, 134, 69, 235, 78, 53, 35, 132, 33, 87, 36, 153]
+
+        buffer = Bytes.new(6)
+        client = HTTP::WebSocket::Protocol.new(io2, masked: true)
+
+        expect_raises(Exception, "Protocol error: expected unmasked frame") do
+          client.receive(buffer)
+        end
+
+        server = HTTP::WebSocket::Protocol.new(io1)
+        info = server.receive(buffer)
+        info.opcode.should eq HTTP::WebSocket::Protocol::Opcode::CLOSE
+        info.size.should eq 2
+        IO::ByteFormat::NetworkEndian.decode(UInt16, buffer).should eq HTTP::WebSocket::CloseCode::ProtocolError.value
+      end
+    end
+  end
+
+  describe "#receive" do
+    it "reads ping packet in between fragmented packet" do
+      protocol_pair do |a, b|
+        a.send "Hel".to_slice, :text, :none
+        a.ping "Foo"
+        a.send "lo".to_slice, :text
+
+        HTTP::WebSocket.new(b).receive?.should eq "Hello"
+
+        buffer = Bytes.new(16)
+        info = a.receive(buffer)
+        info.opcode.should eq HTTP::WebSocket::Protocol::Opcode::PONG
+
+        buffer[0, info.size].should eq "Foo".to_slice
+      end
+    end
+
+    it "rejects invalid packets" do
+      protocol_pair do |a, b|
+        a.send Bytes.empty, :ping, :none
+
+        ws = HTTP::WebSocket.new(b)
+        ws.receive?.should be_nil
+        ws.closed?.should be_true
+
+        info = a.receive(Bytes.empty)
+        info.opcode.should eq HTTP::WebSocket::Protocol::Opcode::CLOSE
+      end
+    end
+  end
+
+  describe "#receive" do
+    it "rejects mixed opcode continuation" do
+      protocol_pair do |a, b|
+        a.send "Foo".to_slice, :text, :none
+        a.send "Bar".to_slice, :binary
+
+        ws = HTTP::WebSocket.new(b)
+        ws.receive?.should be_nil
+        ws.closed?.should be_true
+
+        info = a.receive(Bytes.empty)
+        info.opcode.should eq HTTP::WebSocket::Protocol::Opcode::CLOSE
+      end
+    end
   end
 
   describe "send" do
     it "sends long data with correct header" do
-      size = UInt16::MAX.to_u64 + 1
-      big_string = "a" * size
+      big_string = "abcdefghijklmnopqrstuvwxyz" * (IO::DEFAULT_BUFFER_SIZE // 4)
+      size = big_string.size
       io = IO::Memory.new
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.send(big_string)
@@ -193,7 +290,7 @@ describe HTTP::WebSocket do
       8.times { |i| received_size <<= 8; received_size += bytes[2 + i] }
       received_size.should eq(size)
       size.times do |i|
-        bytes[10 + i].should eq('a'.ord)
+        bytes[10 + i].should eq(big_string[i].ord)
       end
     end
 
@@ -219,9 +316,9 @@ describe HTTP::WebSocket do
       bytes = io.to_slice
       bytes.size.should eq(4 * 2 + 512 * 3) # two frames with 2 bytes header, 2 bytes size, 3 * 512 bytes content in total
       first_frame, second_frame = {bytes[0, (4 + 1024)], bytes + (4 + 1024)}
-      (first_frame[0] & 0x80).should eq(0)   # FINAL bit unset
-      (first_frame[0] & 0x0f).should eq(0x2) # BINARY frame
-      first_frame[1].should eq(126)          # extended size
+      (first_frame[0] & 0x80).should eq(0x00) # FINAL bit unset
+      (first_frame[0] & 0x0f).should eq(0x02) # BINARY frame
+      first_frame[1].should eq(126)           # extended size
       received_size = 0
       2.times { |i| received_size <<= 8; received_size += first_frame[2 + i] }
       received_size.should eq(1024)
@@ -229,9 +326,9 @@ describe HTTP::WebSocket do
         bytes[4 + i].should eq('a'.ord)
       end
 
-      (second_frame[0] & 0x80).should_not eq(0) # FINAL bit set
-      (second_frame[0] & 0x0f).should eq(0x0)   # CONTINUATION frame
-      second_frame[1].should eq(126)            # extended size
+      (second_frame[0] & 0x80).should_not eq(0x00) # FINAL bit set
+      (second_frame[0] & 0x0f).should eq(0x00)     # CONTINUATION frame
+      second_frame[1].should eq(126)               # extended size
       received_size = 0
       2.times { |i| received_size <<= 8; received_size += second_frame[2 + i] }
       received_size.should eq(512)
@@ -240,13 +337,45 @@ describe HTTP::WebSocket do
       end
     end
 
+    it "sends less data than the frame size if necessary" do
+      io = IO::Memory.new
+      ws = HTTP::WebSocket::Protocol.new(io)
+      ws.stream do |io| # default frame size of 1024
+        io.write("hello world".to_slice)
+      end
+
+      bytes = io.to_slice
+      bytes.size.should eq(2 + 11) # one frame with 1 byte header, 1 byte size, "hello world" bytes content in total
+      first_frame = bytes
+      (first_frame[0] & 0x80).should_not eq(0x00) # FINAL bit set
+      (first_frame[0] & 0x0f).should eq(0x02)     # BINARY frame
+      first_frame[1].should eq(11)                # non-extended size
+      (bytes + 2).should eq "hello world".to_slice
+    end
+
     it "sets opcode of first frame to binary if stream is called with binary = true" do
       io = IO::Memory.new
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.stream(binary: true) { |io| }
 
       bytes = io.to_slice
-      (bytes[0] & 0x0f).should eq(0x2) # BINARY frame
+      (bytes[0] & 0x0f).should eq(0x02) # BINARY frame
+    end
+
+    it "should not send frame if stream is flushed" do
+      io = IO::Memory.new
+      ws = HTTP::WebSocket::Protocol.new(io)
+      ws.stream do |stream|
+        stream.write "foo".to_slice
+        stream.flush
+        io.size.should eq 0
+      end # flushed/sent here
+      bytes = io.to_slice
+      bytes.size.should eq 5 # 1 byte header, 1 byte size, 3 byte payload "foo"
+      first_frame = bytes
+      (first_frame[0] & 0x80).should_not eq(0x00) # FINAL bit set
+      (first_frame[0] & 0x0f).should eq(0x02)     # BINARY frame
+      first_frame[1].should eq(3)
     end
   end
 
@@ -268,8 +397,8 @@ describe HTTP::WebSocket do
     end
 
     it "sends long data with correct header" do
-      size = UInt16::MAX.to_u64 + 1
-      big_string = "a" * size
+      big_string = "abcdefghijklmnopqrstuvwxyz" * (IO::DEFAULT_BUFFER_SIZE // 4)
+      size = big_string.size
       io = IO::Memory.new
       ws = HTTP::WebSocket::Protocol.new(io, masked: true)
       ws.send(big_string)
@@ -281,7 +410,7 @@ describe HTTP::WebSocket do
       8.times { |i| received_size <<= 8; received_size += bytes[2 + i] }
       received_size.should eq(size)
       size.times do |i|
-        (bytes[14 + i] ^ bytes[10 + (i % 4)]).should eq('a'.ord)
+        (bytes[14 + i] ^ bytes[10 + (i % 4)]).should eq(big_string[i].ord)
       end
     end
   end
@@ -292,8 +421,8 @@ describe HTTP::WebSocket do
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.close(4020)
       bytes = io.to_slice
-      (bytes[0] & 0x0f).should eq(0x8) # CLOSE frame
-      bytes[1].should eq(2)            # 2 bytes code
+      (bytes[0] & 0x0f).should eq(0x08) # CLOSE frame
+      bytes[1].should eq(0x02)          # 2 bytes code
       bytes[2].should eq(0x0f)
       bytes[3].should eq(0xb4)
     end
@@ -304,8 +433,8 @@ describe HTTP::WebSocket do
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.close(nil, message)
       bytes = io.to_slice
-      (bytes[0] & 0x0f).should eq(0x8) # CLOSE frame
-      bytes[1].should eq(5)            # 2 + message.bytesize
+      (bytes[0] & 0x0f).should eq(0x08) # CLOSE frame
+      bytes[1].should eq(0x05)          # 2 + message.bytesize
       bytes[2].should eq(0x03)
       bytes[3].should eq(0xe8)
       String.new(bytes[4..6]).should eq(message)
@@ -317,8 +446,8 @@ describe HTTP::WebSocket do
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.close(4020, message)
       bytes = io.to_slice
-      (bytes[0] & 0x0f).should eq(0x8) # CLOSE frame
-      bytes[1].should eq(6)            # 2 + message.bytesize
+      (bytes[0] & 0x0f).should eq(0x08) # CLOSE frame
+      bytes[1].should eq(0x06)          # 2 + message.bytesize
       bytes[2].should eq(0x0f)
       bytes[3].should eq(0xb4)
       String.new(bytes[4..7]).should eq(message)
@@ -329,12 +458,12 @@ describe HTTP::WebSocket do
       ws = HTTP::WebSocket::Protocol.new(io)
       ws.close
       bytes = io.to_slice
-      (bytes[0] & 0x0f).should eq(0x8) # CLOSE frame
-      bytes[1].should eq(0)
+      (bytes[0] & 0x0f).should eq(0x08) # CLOSE frame
+      bytes[1].should eq(0x00)
     end
   end
 
-  each_ip_family do |family, _, any_address|
+  each_ip_family do |family, local_address|
     it "negotiates over HTTP correctly" do
       address_chan = Channel(Socket::IPAddress).new
       close_chan = Channel({Int32, String}).new
@@ -351,13 +480,13 @@ describe HTTP::WebSocket do
           end
 
           ws.on_close do |code, message|
-            http_ref.not_nil!.close
+            http_ref.should_not(be_nil).close
             close_chan.send({code.to_i, message})
           end
         end
 
         http_server = http_ref = HTTP::Server.new([ws_handler])
-        address = http_server.bind_tcp(any_address, 0)
+        address = http_server.bind_tcp(local_address, 0)
         address_chan.send(address)
         http_server.listen
       end
@@ -397,13 +526,13 @@ describe HTTP::WebSocket do
           end
 
           ws.on_close do
-            http_ref.not_nil!.close
+            http_ref.should_not(be_nil).close
           end
         end
 
         http_server = http_ref = HTTP::Server.new([ws_handler])
 
-        address = http_server.bind_tls(any_address, context: server_context)
+        address = http_server.bind_tls(local_address, context: server_context)
         address_chan.send(address)
         http_server.listen
       end
@@ -420,6 +549,26 @@ describe HTTP::WebSocket do
       ws2.send(random)
 
       ws2.run
+    end
+  end
+
+  it "sends correct HTTP basic auth header" do
+    ws_handler = HTTP::WebSocketHandler.new do |ws, ctx|
+      ws.send ctx.request.headers["Authorization"]
+      ws.close
+    end
+    http_server = HTTP::Server.new([ws_handler])
+    address = http_server.bind_unused_port
+
+    run_server(http_server) do
+      client = HTTP::WebSocket.new("ws://test_username:test_password@#{address}")
+      message = nil
+      client.on_message do |msg|
+        message = msg
+      end
+      client.run
+      message.should eq(
+        "Basic #{Base64.strict_encode("test_username:test_password")}")
     end
   end
 
@@ -485,6 +634,130 @@ describe HTTP::WebSocket do
     end
   end
 
+  it "allows receiving messages synchronously" do
+    ws_handler = HTTP::WebSocketHandler.new do |ws, ctx|
+      str = ws.receive.as(String)
+      2.times do
+        ws.send(str)
+        ws.send(str.to_slice)
+      end
+      ws.close :normal_closure, "bye!"
+    end
+    http_server = HTTP::Server.new([ws_handler])
+
+    address = http_server.bind_unused_port
+
+    run_server(http_server) do
+      client = HTTP::WebSocket.new("ws://#{address}")
+      client.send "hello"
+
+      client.receive.should eq "hello"
+      client.receive.should eq "hello".to_slice
+
+      client.receive?.should eq "hello"
+      client.receive?.should eq "hello".to_slice
+
+      # The WebSocket is closed after sending the above messages
+      client.receive?.should eq nil
+    end
+  end
+
+  describe "Sec-WebSocket-Protocol" do
+    it "fails handshake if server does not include Sec-WebSocket-Protocol in response when requested" do
+      http_server = HTTP::Server.new do |context|
+        response = context.response
+        key = context.request.headers["Sec-WebSocket-Key"]
+        response.status_code = 101
+        response.headers["Upgrade"] = "websocket"
+        response.headers["Connection"] = "Upgrade"
+        response.headers["Sec-WebSocket-Accept"] = HTTP::WebSocket::Protocol.key_challenge(key) if key
+      end
+
+      address = http_server.bind_unused_port
+
+      run_server(http_server) do
+        expect_raises(Socket::Error, "Handshake got denied. Server did not respond with Sec-WebSocket-Protocol.") do
+          HTTP::WebSocket::Protocol.new(
+            address.address,
+            port: address.port,
+            path: "/",
+            protocols: ["chat"]
+          )
+        end
+      end
+    end
+
+    it "fails handshake if server responds with non-requested Sec-WebSocket-Protocol" do
+      http_server = HTTP::Server.new do |context|
+        response = context.response
+        key = context.request.headers["Sec-WebSocket-Key"]
+        response.status_code = 101
+        response.headers["Upgrade"] = "websocket"
+        response.headers["Connection"] = "Upgrade"
+        response.headers["Sec-WebSocket-Accept"] = HTTP::WebSocket::Protocol.key_challenge(key) if key
+        response.headers["Sec-WebSocket-Protocol"] = "video"
+      end
+
+      address = http_server.bind_unused_port
+
+      run_server(http_server) do
+        expect_raises(Socket::Error, "Handshake got denied. Server responded with an invalid Sec-WebSocket-Protocol.") do
+          HTTP::WebSocket::Protocol.new(
+            address.address,
+            port: address.port,
+            path: "/",
+            protocols: ["chat"]
+          )
+        end
+      end
+    end
+
+    it "accepts handshake if server responds with one of the requested Sec-WebSocket-Protocol" do
+      http_server = HTTP::Server.new do |context|
+        response = context.response
+        key = context.request.headers["Sec-WebSocket-Key"]
+        response.status_code = 101
+        response.headers["Upgrade"] = "websocket"
+        response.headers["Connection"] = "Upgrade"
+        response.headers["Sec-WebSocket-Accept"] = HTTP::WebSocket::Protocol.key_challenge(key) if key
+        response.headers["Sec-WebSocket-Protocol"] = "chat"
+      end
+
+      address = http_server.bind_unused_port
+
+      run_server(http_server) do
+        ws = HTTP::WebSocket::Protocol.new(
+          address.address,
+          port: address.port,
+          path: "/",
+          protocols: ["chat", "video"]
+        )
+        ws.protocol.should eq("chat")
+      end
+    end
+
+    it "accepts handshake if neither provided nor responded Sec-WebSocket-Protocol" do
+      http_server = HTTP::Server.new do |context|
+        response = context.response
+        key = context.request.headers["Sec-WebSocket-Key"]
+        response.status_code = 101
+        response.headers["Upgrade"] = "websocket"
+        response.headers["Connection"] = "Upgrade"
+        response.headers["Sec-WebSocket-Accept"] = HTTP::WebSocket::Protocol.key_challenge(key) if key
+      end
+
+      address = http_server.bind_unused_port
+
+      run_server(http_server) do
+        HTTP::WebSocket::Protocol.new(
+          address.address,
+          port: address.port,
+          path: "/"
+        )
+      end
+    end
+  end
+
   describe "handshake fails if server does not verify Sec-WebSocket-Key" do
     it "Sec-WebSocket-Accept missing" do
       http_server = HTTP::Server.new do |context|
@@ -526,4 +799,63 @@ describe HTTP::WebSocket do
   typeof(HTTP::WebSocket.new("localhost", "/"))
   typeof(HTTP::WebSocket.new("ws://localhost"))
   typeof(HTTP::WebSocket.new(URI.parse("ws://localhost"), headers: HTTP::Headers{"X-TEST_HEADER" => "some-text"}))
+end
+
+private def integration_setup(&)
+  bin_ch = Channel(Bytes).new
+  txt_ch = Channel(String).new
+  ws_handler = HTTP::WebSocketHandler.new do |ws, ctx|
+    ws.on_binary { |bytes| bin_ch.send bytes }
+    ws.on_message { |bytes| txt_ch.send bytes }
+  end
+  server = HTTP::Server.new [ws_handler]
+  address = server.bind_unused_port
+  spawn server.listen
+  wsoc = HTTP::WebSocket.new("http://#{address}")
+
+  yield wsoc, bin_ch, txt_ch
+ensure
+  server.close if server
+end
+
+describe "Websocket integration tests" do
+  # default frame size is 1024, but be explicit here in case the default changes in the future
+
+  it "streams less than the buffer frame size" do
+    integration_setup do |wsoc, bin_ch, _|
+      bytes = "hello test world".to_slice
+      wsoc.stream(frame_size: 1024, &.write(bytes))
+      received = bin_ch.receive
+      received.should eq bytes
+    end
+  end
+
+  it "streams single messages more than the buffer frame size" do
+    integration_setup do |wsoc, bin_ch, _|
+      bytes = ("hello test world" * 80).to_slice
+      bytes.size.should be > 1024
+      wsoc.stream(frame_size: 1024, &.write(bytes))
+      received = bin_ch.receive
+      received.should eq bytes
+    end
+  end
+
+  it "streams single messages made up of multiple parts that eventually become more than the buffer frame size" do
+    integration_setup do |wsoc, bin_ch, _|
+      bytes = "hello test world".to_slice
+      wsoc.stream(frame_size: 1024) { |io| 80.times { io.write bytes } }
+      received = bin_ch.receive
+      received.size.should be > 1024
+      received.should eq ("hello test world" * 80).to_slice
+    end
+  end
+
+  it "sends single text messages" do
+    integration_setup do |wsoc, _, txt_ch|
+      wsoc.send "hello text"
+      wsoc.send "hello again"
+      txt_ch.receive.should eq "hello text"
+      txt_ch.receive.should eq "hello again"
+    end
+  end
 end

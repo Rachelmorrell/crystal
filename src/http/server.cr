@@ -15,6 +15,8 @@ require "log"
 # A server is initialized with a handler chain responsible for processing each
 # incoming request.
 #
+# NOTE: To use `Server`, you must explicitly import it with `require "http/server"`
+#
 # ```
 # require "http/server"
 #
@@ -146,12 +148,12 @@ class HTTP::Server
 
   # Creates a new HTTP server with a handler chain constructed from the *handlers*
   # array and the given block.
-  def self.new(handlers : Array(HTTP::Handler), &handler : HTTP::Handler::HandlerProc) : self
+  def self.new(handlers : Indexable(HTTP::Handler), &handler : HTTP::Handler::HandlerProc) : self
     new(HTTP::Server.build_middleware(handlers, handler))
   end
 
   # Creates a new HTTP server with the *handlers* array as handler chain.
-  def self.new(handlers : Array(HTTP::Handler)) : self
+  def self.new(handlers : Indexable(HTTP::Handler)) : self
     new(HTTP::Server.build_middleware(handlers))
   end
 
@@ -173,7 +175,7 @@ class HTTP::Server
   end
 
   # Sets the maximum permitted size for the request line in an HTTP request.
-  def max_request_line_size=(size : Int32)
+  def max_request_line_size=(size : Int32) : Int32
     @processor.max_request_line_size = size
   end
 
@@ -191,7 +193,7 @@ class HTTP::Server
   end
 
   # Sets the maximum permitted combined size for the headers in an HTTP request.
-  def max_headers_size=(size : Int32)
+  def max_headers_size=(size : Int32) : Int32
     @processor.max_headers_size = size
   end
 
@@ -443,8 +445,14 @@ class HTTP::Server
     listen
   end
 
+  # Overwrite this method to implement an alternative concurrency handler
+  # one example could be the use of a fiber pool
+  protected def dispatch(io)
+    spawn handle_client(io)
+  end
+
   # Starts the server. Blocks until the server is closed.
-  def listen
+  def listen : Nil
     raise "Can't re-start closed server" if closed?
     raise "Can't start server with no sockets to listen to, use HTTP::Server#bind first" if @sockets.empty?
     raise "Can't start running server" if listening?
@@ -454,18 +462,18 @@ class HTTP::Server
 
     @sockets.each do |socket|
       spawn do
-        until closed?
+        loop do
           io = begin
             socket.accept?
           rescue e
             handle_exception(e)
-            nil
+            next
           end
 
           if io
-            # a non nillable version of the closured io
-            _io = io
-            spawn handle_client(_io)
+            dispatch(io)
+          else
+            break
           end
         end
       ensure
@@ -478,7 +486,7 @@ class HTTP::Server
 
   # Gracefully terminates the server. It will process currently accepted
   # requests, but it won't accept new connections.
-  def close
+  def close : Nil
     raise "Can't close server, it's already closed" if closed?
 
     @closed = true
@@ -510,9 +518,14 @@ class HTTP::Server
       end
     {% end %}
 
-    @processor.process(io, io)
+    @processor.process(io)
   ensure
-    io.close rescue IO::Error
+    {% begin %}
+      begin
+        io.close
+      rescue IO::Error{% unless flag?(:without_openssl) %} | OpenSSL::SSL::Error{% end %}
+      end
+    {% end %}
   end
 
   # This method handles exceptions raised at `Socket#accept?`.
@@ -524,7 +537,7 @@ class HTTP::Server
   end
 
   # Builds all handlers as the middleware for `HTTP::Server`.
-  def self.build_middleware(handlers, last_handler : (Context ->)? = nil)
+  def self.build_middleware(handlers : Indexable(HTTP::Handler), last_handler : (Context ->)? = nil) : HTTP::Handler
     raise ArgumentError.new "You must specify at least one HTTP Handler." if handlers.empty?
     0.upto(handlers.size - 2) { |i| handlers[i].next = handlers[i + 1] }
     handlers.last.next = last_handler if last_handler
